@@ -1,0 +1,20 @@
+# AppImage build outputs and downloaded tooling — everything here is regenerated
+# by build-appimage.sh. The committed assets (qcast.desktop, qcast.png,
+# build-appimage.sh, this .gitignore) are explicitly un-ignored below.
+
+# Build dir (AppDir layout, staged binary/plugins) and tool cache.
+build/
+cache/
+
+# Downloaded linuxdeploy tooling, wherever it lands.
+linuxdeploy*
+*.AppImage
+
+# Generated AppImage outputs.
+Qcast-*.AppImage
+
+# Keep the committable assets even though patterns above are broad.
+!qcast.desktop
+!qcast.png
+!build-appimage.sh
+!.gitignore

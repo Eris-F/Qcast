@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Qcast
+GenericName=Screen Caster
+Comment=Stream your desktop to a browser over WebRTC
+Exec=qcast-sender
+Icon=qcast
+Categories=Network;Utility;
+Terminal=false
+StartupNotify=true
