@@ -51,6 +51,10 @@ struct Args {
     /// Capture source: `auto` (real screen via portal, falls back to test) or `test`.
     #[arg(long, default_value = "auto")]
     source: String,
+    /// Capture quality. Baseline `1080p60`; `720p30` is the compatibility backup
+    /// for devices that can't decode 1080p60 (H.264 level 4.2).
+    #[arg(long, default_value = "1080p60")]
+    quality: String,
 }
 
 /// Where the host gets video frames.
@@ -62,10 +66,26 @@ enum SourceSpec {
     Screen { fd: i32, node_id: u32 },
 }
 
+/// Capture resolution + framerate.
+#[derive(Clone, Copy, Debug)]
+struct Quality {
+    w: u32,
+    h: u32,
+    fps: u32,
+}
+
+fn parse_quality(s: &str) -> Quality {
+    match s {
+        "720p30" => Quality { w: 1280, h: 720, fps: 30 },
+        _ => Quality { w: 1920, h: 1080, fps: 60 }, // baseline 1080p60
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     encoder: String,
     source: SourceSpec,
+    quality: Quality,
 }
 
 #[tokio::main]
@@ -104,7 +124,9 @@ async fn main() -> Result<()> {
         }
     };
 
-    let state = AppState { encoder, source };
+    let quality = parse_quality(&args.quality);
+    tracing::info!(?quality, "capture quality (use --quality 720p30 as a compatibility backup)");
+    let state = AppState { encoder, source, quality };
     let app = Router::new()
         .route("/", get(index))
         .route("/client.js", get(client_js))
@@ -152,7 +174,7 @@ async fn favicon() -> axum::http::StatusCode {
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
     ws.on_upgrade(move |socket| async move {
         tracing::info!("browser connected");
-        if let Err(e) = run_session(socket, &state.encoder, &state.source).await {
+        if let Err(e) = run_session(socket, &state.encoder, &state.source, state.quality).await {
             tracing::warn!(error = ?e, "session ended with error");
         }
         tracing::info!("session closed");
@@ -161,30 +183,38 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Resp
 
 /// One browser viewer: build a webrtcbin pipeline, offer, and pump SDP/ICE
 /// between the gstreamer callbacks (via an mpsc channel) and this WebSocket.
-async fn run_session(socket: WebSocket, encoder: &str, source: &SourceSpec) -> Result<()> {
+async fn run_session(
+    socket: WebSocket,
+    encoder: &str,
+    source: &SourceSpec,
+    quality: Quality,
+) -> Result<()> {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (sig_tx, mut sig_rx) = mpsc::unbounded_channel::<SignalMessage>();
 
-    let (pipeline, webrtcbin, frames) = build_pipeline(encoder, source, sig_tx)?;
+    let (pipeline, webrtcbin, captured, sent) = build_pipeline(encoder, source, quality, sig_tx)?;
     pipeline
         .set_state(gst::State::Playing)
         .context("set pipeline to Playing")?;
 
-    // Stall detector: log frames/s leaving the encoder; warn loudly on zero.
+    // Stall detector: per-second capture vs sent frame rates. sent==0 = stall;
+    // comparing the two locates it (capture stalled vs covered by keepalive).
     let fps_task = tokio::spawn({
-        let frames = frames.clone();
+        let captured = captured.clone();
+        let sent = sent.clone();
         async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
-            let mut last = 0u64;
+            let (mut last_cap, mut last_sent) = (0u64, 0u64);
             loop {
                 interval.tick().await;
-                let total = frames.load(Ordering::Relaxed);
-                let fps = total - last;
-                last = total;
-                if fps == 0 {
-                    tracing::warn!(total, "STALL: 0 frames left the encoder in the last second");
+                let (cap, snt) = (captured.load(Ordering::Relaxed), sent.load(Ordering::Relaxed));
+                let (cap_fps, sent_fps) = (cap - last_cap, snt - last_sent);
+                last_cap = cap;
+                last_sent = snt;
+                if sent_fps == 0 {
+                    tracing::warn!(cap_fps, sent_fps, "STALL: nothing sent to webrtc this second");
                 } else {
-                    tracing::info!(fps, total, "frames/s");
+                    tracing::info!(cap_fps, sent_fps, "frames/s (capture -> sent)");
                 }
             }
         }
@@ -226,30 +256,36 @@ async fn run_session(socket: WebSocket, encoder: &str, source: &SourceSpec) -> R
 fn build_pipeline(
     encoder: &str,
     source: &SourceSpec,
+    quality: Quality,
     sig_tx: UnboundedSender<SignalMessage>,
-) -> Result<(gst::Pipeline, gst::Element, Arc<AtomicU64>)> {
+) -> Result<(gst::Pipeline, gst::Element, Arc<AtomicU64>, Arc<AtomicU64>)> {
     // Source branch produces NV12 raw video, scaled to a mobile-safe 720p
     // (letterboxed to preserve aspect) at a capped framerate. The shared tail
     // encodes H.264 as **constrained-baseline** — the profile every mobile
     // browser decoder handles — then RTP-payloads into webrtcbin.
+    let Quality { w, h, fps } = quality;
     let source_desc = match source {
-        SourceSpec::Test => "videotestsrc is-live=true pattern=ball ! \
-             video/x-raw,width=1280,height=720,framerate=30/1 ! videoconvert"
-            .to_string(),
+        SourceSpec::Test => format!(
+            "videotestsrc is-live=true pattern=ball ! \
+             video/x-raw,width={w},height={h},framerate={fps}/1 ! videoconvert"
+        ),
         SourceSpec::Screen { fd, node_id } => format!(
-            // do-timestamp + keepalive-time: KWin's capture is damage-driven and
-            // stops emitting frames on a static screen; keepalive resends the last
-            // buffer so the stream never goes dead. drop-only avoids retroactive
-            // duplicate bursts after an idle gap.
-            "pipewiresrc fd={fd} path={node_id} do-timestamp=true keepalive-time=1000 ! \
+            // KWin capture is damage-driven (stops on a static screen);
+            // keepalive-time resends the last buffer so videorate always has
+            // recent frames to pace from. videorate locks the output framerate.
+            "pipewiresrc fd={fd} path={node_id} do-timestamp=true keepalive-time=100 ! \
              videoconvert ! videoscale add-borders=true ! \
-             video/x-raw,format=NV12,width=1280,height=720 ! \
-             videorate drop-only=true ! video/x-raw,framerate=30/1"
+             video/x-raw,format=NV12,width={w},height={h} ! \
+             videorate name=rate ! video/x-raw,framerate={fps}/1"
         ),
     };
+    // Encoder tuning: a 1-second GOP so the stream recovers from packet loss
+    // without waiting for a scene change (an infinite GOP freezes until then),
+    // no B-frames, low latency. constrained-baseline keeps it broadly decodable.
+    let enc = encoder_tuning(encoder, fps);
     let desc = format!(
         "{source_desc} ! \
-         {encoder} ! video/x-h264,profile=constrained-baseline ! h264parse ! \
+         {encoder} {enc} ! video/x-h264,profile=constrained-baseline ! h264parse ! \
          rtph264pay name=pay config-interval=-1 pt=96 ! \
          application/x-rtp,media=video,encoding-name=H264,payload=96 ! \
          webrtcbin name=qwebrtc bundle-policy=max-bundle"
@@ -287,17 +323,26 @@ fn build_pipeline(
         tracing::info!(state = ?wb.property_value("ice-connection-state"), "webrtc ice-connection-state");
     });
 
-    // Count buffers leaving the payloader to detect stalls (see frames/s logger).
-    let frames = Arc::new(AtomicU64::new(0));
+    // Two stall probes locate where frames stop: capture rate (videorate sink,
+    // Screen only) vs sent rate (payloader src).
+    let captured = Arc::new(AtomicU64::new(0));
+    let sent = Arc::new(AtomicU64::new(0));
+    if let Some(pad) = pipeline.by_name("rate").and_then(|e| e.static_pad("sink")) {
+        let captured = captured.clone();
+        pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+            captured.fetch_add(1, Ordering::Relaxed);
+            gst::PadProbeReturn::Ok
+        });
+    }
     match pipeline.by_name("pay").and_then(|p| p.static_pad("src")) {
-        Some(srcpad) => {
-            let frames = frames.clone();
-            srcpad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
-                frames.fetch_add(1, Ordering::Relaxed);
+        Some(pad) => {
+            let sent = sent.clone();
+            pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                sent.fetch_add(1, Ordering::Relaxed);
                 gst::PadProbeReturn::Ok
             });
         }
-        None => tracing::warn!("payloader src pad not found; frame-stall logging disabled"),
+        None => tracing::warn!("payloader src pad not found; stall logging disabled"),
     }
     // -------------------------------------------------------------------------
 
@@ -346,7 +391,21 @@ fn build_pipeline(
         None
     });
 
-    Ok((pipeline, webrtcbin, frames))
+    Ok((pipeline, webrtcbin, captured, sent))
+}
+
+/// Encoder-specific launch args: ~1-second GOP (so the stream self-heals from
+/// packet loss instead of freezing until a scene change), no B-frames, and
+/// low-latency mode where supported. Empty for unknown encoders.
+fn encoder_tuning(encoder: &str, fps: u32) -> String {
+    match encoder {
+        "nvh264enc" => format!("gop-size={fps} bframes=0 zerolatency=true"),
+        "x264enc" => format!("key-int-max={fps} b-frames=0 tune=zerolatency speed-preset=veryfast"),
+        "openh264enc" => format!("gop-size={fps}"),
+        "vah264enc" | "vah264lpenc" => format!("key-int-max={fps}"),
+        "qsvh264enc" => format!("gop-size={fps}"),
+        _ => String::new(),
+    }
 }
 
 /// Apply a signal received from the browser to the webrtcbin.
