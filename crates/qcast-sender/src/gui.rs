@@ -243,6 +243,25 @@ impl App {
                     ui.ctx().copy_text(self.report.url.clone());
                 }
             });
+
+            // The access code is shared SEPARATELY from the URL/QR (which only
+            // reach the page). The viewer types this on the page's password gate.
+            ui.add_space(10.0);
+            ui.strong("Password (viewers enter this):");
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(&self.cfg.access_code)
+                        .monospace()
+                        .size(22.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(120, 200, 255)),
+                );
+                if ui.small_button("copy").clicked() {
+                    ui.ctx().copy_text(self.cfg.access_code.clone());
+                }
+            });
+            ui.weak("Share this with viewers separately — they type it on the page to start watching.");
+
             ui.add_space(8.0);
             if let Some((side, dark)) = &self.qr {
                 draw_qr(ui, *side, dark, 220.0);

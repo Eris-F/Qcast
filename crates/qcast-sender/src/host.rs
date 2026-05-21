@@ -105,6 +105,11 @@ pub struct HostConfig {
     pub signalling_port: u16,
     /// Use the built-in test pattern instead of real screen capture.
     pub test_pattern: bool,
+    /// The viewer access code (the "password" the operator shares). Generated
+    /// once in `main()`; the single source of truth used by both the GUI display
+    /// and the served `session.json`. NOTE: this is a client-side UX gate, not
+    /// enforced authentication — anyone on the LAN can read `session.json`.
+    pub access_code: String,
 }
 
 /// A live host. Dropping it (or calling [`RunningHost::stop`]) tears the pipeline
@@ -140,6 +145,18 @@ pub fn lan_url(host: &str, web_port: u16) -> (String, String) {
         .unwrap_or_else(|| host.to_string());
     let url = format!("http://{lan_ip}:{web_port}/");
     (lan_ip, url)
+}
+
+/// Write `session.json` into the served web-client directory. The browser fetches
+/// this on load to learn the expected access code for the password gate. Kept
+/// deliberately small: `{"name":"qcast","auth":"GHF/ABA/6TJ"}`.
+fn write_session_json(dir: &std::path::Path, access_code: &str) -> Result<()> {
+    let session = serde_json::json!({ "name": "qcast", "auth": access_code });
+    let body = serde_json::to_string(&session).context("serialize session.json")?;
+    let path = dir.join("session.json");
+    std::fs::write(&path, body).with_context(|| format!("write {}", path.display()))?;
+    tracing::debug!(path = %path.display(), "wrote session.json");
+    Ok(())
 }
 
 /// Start the host on a dedicated thread. Blocks until the pipeline reaches
@@ -214,6 +231,15 @@ fn run_pipeline(
             return;
         }
     };
+
+    // Write session.json into the served directory BEFORE the pipeline starts so
+    // it's available the instant the web server comes up. This carries the access
+    // code to the browser gate. Works for both the extracted-temp-dir case and
+    // the QCAST_WEB_CLIENT_DIR dev override (session.json is gitignored there).
+    if let Err(e) = write_session_json(web_client.path(), &cfg.access_code) {
+        let _ = tx.send(Err(e.context("write session.json")));
+        return;
+    }
 
     let source_desc = if cfg.test_pattern {
         tracing::info!("using test pattern");

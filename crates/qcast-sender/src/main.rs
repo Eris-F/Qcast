@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+mod access_code;
 mod bundle;
 mod capture;
 mod gui;
@@ -60,11 +61,17 @@ fn main() -> Result<()> {
     gst::init().expect("failed to initialize GStreamer");
     let args = Args::parse();
 
+    // Generate the viewer access code ONCE here: this is the single source of
+    // truth shared by the GUI display, the headless log line, and the served
+    // session.json the browser reads.
+    let access_code = access_code::generate();
+
     let cfg = host::HostConfig {
         host: args.host.clone(),
         web_port: args.web_port,
         signalling_port: args.signalling_port,
         test_pattern: args.source == "test",
+        access_code,
     };
 
     // One quit signal for the whole process: Ctrl+C / SIGTERM flips it (and wakes
@@ -98,8 +105,10 @@ fn run_headless(cfg: host::HostConfig, quit: Arc<AtomicBool>) -> Result<()> {
              (see deploy/setup-linux.sh)"
         );
     }
+    let code = cfg.access_code.clone();
     let mut running = host::start(cfg)?;
     tracing::info!("qcast host serving — open  {}  on any device", running.url);
+    tracing::info!("viewer password: {}", code);
     while !quit.load(Ordering::SeqCst) {
         std::thread::sleep(Duration::from_millis(200));
     }

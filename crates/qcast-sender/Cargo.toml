@@ -12,6 +12,9 @@ tracing-subscriber.workspace = true
 gstreamer.workspace = true
 clap.workspace = true
 tokio.workspace = true
+serde_json.workspace = true
+# Random access-code generation for the viewer password gate.
+rand = "0.8"
 eframe = "0.34.2"
 global-hotkey = "0.8.0"
 qrcode = "0.14.1"
