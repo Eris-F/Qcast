@@ -39,9 +39,35 @@ struct Args {
     /// Capture source: `auto` (real screen) or `test` (test pattern).
     #[arg(long, default_value = "auto")]
     source: String,
+    /// Max captured-frame width (the videoscale cap), e.g. 1920 for 1080p or 1280
+    /// for 720p. Values above 1080p may not decode on every browser.
+    #[arg(long, default_value_t = host::VIDEO_MAX_WIDTH)]
+    max_width: u32,
+    /// Max captured-frame height (the videoscale cap), e.g. 1080 for 1080p or 720
+    /// for 720p.
+    #[arg(long, default_value_t = host::VIDEO_MAX_HEIGHT)]
+    max_height: u32,
+    /// Video codec preference: `auto` (VP8 preferred), `h264` (H.264 preferred),
+    /// `vp8-only`, or `h264-only`.
+    #[arg(long, default_value = "auto")]
+    codec: String,
     /// Skip the GUI: start streaming immediately and run until Ctrl+C.
     #[arg(long)]
     headless: bool,
+}
+
+/// Parse the `--codec` CLI value into a [`host::CodecPref`]. Boundary validation:
+/// reject unknown values with a clear message listing the accepted ones.
+fn parse_codec_pref(value: &str) -> Result<host::CodecPref> {
+    match value {
+        "auto" => Ok(host::CodecPref::Auto),
+        "h264" => Ok(host::CodecPref::H264Preferred),
+        "vp8-only" => Ok(host::CodecPref::Vp8Only),
+        "h264-only" => Ok(host::CodecPref::H264Only),
+        other => anyhow::bail!(
+            "unknown --codec '{other}'; expected one of: auto, h264, vp8-only, h264-only"
+        ),
+    }
 }
 
 fn main() -> Result<()> {
@@ -61,6 +87,11 @@ fn main() -> Result<()> {
     gst::init().expect("failed to initialize GStreamer");
     let args = Args::parse();
 
+    // Validate operator-supplied options at the boundary, before they reach the
+    // pipeline. Fail fast with a clear message.
+    host::validate_resolution(args.max_width, args.max_height)?;
+    let codec_pref = parse_codec_pref(&args.codec)?;
+
     // Generate the viewer access code ONCE here: this is the single source of
     // truth shared by the GUI display, the headless log line, and the served
     // session.json the browser reads.
@@ -71,6 +102,9 @@ fn main() -> Result<()> {
         web_port: args.web_port,
         signalling_port: args.signalling_port,
         test_pattern: args.source == "test",
+        max_width: args.max_width,
+        max_height: args.max_height,
+        codec_pref,
         access_code,
     };
 

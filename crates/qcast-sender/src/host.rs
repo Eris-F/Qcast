@@ -101,9 +101,79 @@ impl Drop for WebClientDir {
     }
 }
 
-/// Cap the captured video to a 1080p box before encoding (see [`build_pipeline`]).
-const VIDEO_MAX_WIDTH: u32 = 1920;
-const VIDEO_MAX_HEIGHT: u32 = 1080;
+/// Default cap for the captured video: a 1080p box before encoding (see
+/// [`build_pipeline`]). This is the universally-decodable baseline; the operator
+/// can override it via [`HostConfig::max_width`] / [`HostConfig::max_height`].
+pub const VIDEO_MAX_WIDTH: u32 = 1920;
+pub const VIDEO_MAX_HEIGHT: u32 = 1080;
+
+/// Hard upper bound we accept for a custom resolution edge length. Above this we
+/// reject at the boundary: webrtcsink scales per-consumer anyway, and arbitrarily
+/// huge frames just waste encode/scale cycles while exceeding every browser
+/// decoder's frame-size ceiling. 7680 covers an 8K edge (the practical maximum).
+pub const RESOLUTION_MAX_EDGE: u32 = 7680;
+
+/// Codec preference: governs the `video-caps` proposed to webrtcsink, both WHICH
+/// codecs are offered and in what ORDER (the first listed is preferred during
+/// negotiation).
+///
+/// Rationale: VP8 has no profile/level frame-size ceiling, so a 1080p frame
+/// decodes on every browser (incl. Firefox, whose H.264 is locked to constrained-
+/// baseline Level 3.1 ≈ 720p). H.264 hardware-decodes well on Chrome/Safari/
+/// Android. Preferring VP8 is the safe default; the operator can flip the
+/// preference or restrict to a single codec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodecPref {
+    /// Offer both, VP8 preferred (default). Maps to `"video/x-vp8;video/x-h264"`.
+    Auto,
+    /// Offer both, H.264 preferred. Maps to `"video/x-h264;video/x-vp8"`.
+    H264Preferred,
+    /// Offer VP8 only. Maps to `"video/x-vp8"`.
+    Vp8Only,
+    /// Offer H.264 only. Maps to `"video/x-h264"`.
+    H264Only,
+}
+
+impl CodecPref {
+    /// The `video-caps` string for this preference (codec list + ordering). The
+    /// first entry is the preferred codec during negotiation.
+    pub fn video_caps(self) -> &'static str {
+        match self {
+            CodecPref::Auto => "video/x-vp8;video/x-h264",
+            CodecPref::H264Preferred => "video/x-h264;video/x-vp8",
+            CodecPref::Vp8Only => "video/x-vp8",
+            CodecPref::H264Only => "video/x-h264",
+        }
+    }
+}
+
+impl Default for CodecPref {
+    fn default() -> Self {
+        CodecPref::Auto
+    }
+}
+
+/// Validate an operator-chosen resolution cap at the boundary, before it reaches
+/// the pipeline. Frame dimensions must be positive, even (most encoders/scalers
+/// require even width+height for chroma subsampling), and within a sane edge
+/// bound. Returns a clear, user-facing message on rejection.
+pub fn validate_resolution(width: u32, height: u32) -> Result<()> {
+    if width == 0 || height == 0 {
+        anyhow::bail!("resolution width and height must be greater than 0");
+    }
+    if width % 2 != 0 || height % 2 != 0 {
+        anyhow::bail!(
+            "resolution width and height must be even numbers (got {width}x{height})"
+        );
+    }
+    if width > RESOLUTION_MAX_EDGE || height > RESOLUTION_MAX_EDGE {
+        anyhow::bail!(
+            "resolution {width}x{height} exceeds the maximum supported edge of \
+             {RESOLUTION_MAX_EDGE}px"
+        );
+    }
+    Ok(())
+}
 
 /// How the host should be configured. Cloneable so the GUI can keep a copy for
 /// "retry" after a failed start.
@@ -117,6 +187,15 @@ pub struct HostConfig {
     pub signalling_port: u16,
     /// Use the built-in test pattern instead of real screen capture.
     pub test_pattern: bool,
+    /// Max captured-frame width before encoding (the `videoscale` cap). Defaults
+    /// to [`VIDEO_MAX_WIDTH`] (1080p baseline). Values above 1080p may not decode
+    /// on every browser.
+    pub max_width: u32,
+    /// Max captured-frame height before encoding (the `videoscale` cap). Defaults
+    /// to [`VIDEO_MAX_HEIGHT`] (1080p baseline).
+    pub max_height: u32,
+    /// Which video codec(s) to propose to viewers and in what preference order.
+    pub codec_pref: CodecPref,
     /// The viewer access code (the "password" the operator shares). Generated
     /// once in `main()`; the single source of truth used by both the GUI display
     /// and the served `session.json`. NOTE: this is a client-side UX gate, not
@@ -518,12 +597,13 @@ fn sleep_interruptible(dur: Duration, quit: &Arc<AtomicBool>) -> bool {
 
 /// Build the `… ! videoconvert ! videoscale ! webrtcsink` pipeline.
 ///
-/// The `videoscale ! …,width=1920,height=1080` cap is required for decodability:
-/// browser WebRTC decoders advertise hard frame-size ceilings (Firefox H.264 =
-/// constrained-baseline Level 3.1 ≈ 720p; VP8 max-fs=12288 MB ≈ 3.1 MP). A capture
-/// larger than 1080p exceeds those ceilings, so the decoder cannot decode the
-/// frames. Capping to a 1080p box (`add-borders` letterboxes any aspect) keeps a
-/// 1080p baseline while staying decodable everywhere; webrtcsink still adapts
+/// The `videoscale ! …,width=W,height=H` cap is required for decodability: browser
+/// WebRTC decoders advertise hard frame-size ceilings (Firefox H.264 = constrained-
+/// baseline Level 3.1 ≈ 720p; VP8 max-fs=12288 MB ≈ 3.1 MP). A capture larger than
+/// 1080p exceeds those ceilings, so some browsers cannot decode the frames. The cap
+/// defaults to a 1080p box ([`VIDEO_MAX_WIDTH`]×[`VIDEO_MAX_HEIGHT`]) — the
+/// universally-decodable baseline — but the operator can override `cfg.max_width`/
+/// `cfg.max_height`. `add-borders` letterboxes any aspect; webrtcsink still adapts
 /// bitrate/scale down per consumer.
 fn build_pipeline(
     source_desc: &str,
@@ -537,8 +617,8 @@ fn build_pipeline(
          run-signalling-server=true signalling-server-host={host} signalling-server-port={sport} \
          run-web-server=true web-server-host-addr=http://{host}:{wport} web-server-directory={dir} \
          enable-control-data-channel=true",
-        vw = VIDEO_MAX_WIDTH,
-        vh = VIDEO_MAX_HEIGHT,
+        vw = cfg.max_width,
+        vh = cfg.max_height,
         host = cfg.host,
         sport = cfg.signalling_port,
         wport = cfg.web_port,
@@ -550,11 +630,13 @@ fn build_pipeline(
         .map_err(|_| anyhow!("parsed description is not a pipeline"))?;
 
     if let Some(ws) = pipeline.by_name("ws") {
-        // Prefer VP8 over H.264. VP8 has no profile/level ceiling, so a 1080p frame
-        // decodes on every browser (incl. Firefox, whose H.264 is locked to L3.1/720p).
-        // H.264 stays available as a fallback for devices that advertise a high enough
-        // level (Chrome/Safari/Android) and can hardware-decode it.
-        if let Ok(caps) = gst::Caps::from_str("video/x-vp8;video/x-h264") {
+        // Codec preference governs which codecs are proposed and in what order.
+        // VP8 has no profile/level ceiling, so a 1080p frame decodes on every
+        // browser (incl. Firefox, whose H.264 is locked to L3.1/720p); H.264 is a
+        // hardware-friendly fallback on Chrome/Safari/Android. The default (Auto)
+        // offers both with VP8 first; the operator may flip the order or restrict
+        // to a single codec.
+        if let Ok(caps) = gst::Caps::from_str(cfg.codec_pref.video_caps()) {
             ws.set_property("video-caps", &caps);
         }
         // "extra data" #1: static per-stream metadata for our custom client.
@@ -596,6 +678,68 @@ fn primary_lan_ip() -> Option<std::net::IpAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each codec preference maps to the expected `video-caps` string, with the
+    /// preferred codec first (negotiation prefers the leading entry).
+    #[test]
+    fn codec_pref_maps_to_video_caps() {
+        assert_eq!(CodecPref::Auto.video_caps(), "video/x-vp8;video/x-h264");
+        assert_eq!(
+            CodecPref::H264Preferred.video_caps(),
+            "video/x-h264;video/x-vp8"
+        );
+        assert_eq!(CodecPref::Vp8Only.video_caps(), "video/x-vp8");
+        assert_eq!(CodecPref::H264Only.video_caps(), "video/x-h264");
+        // The default preference is VP8-preferred (Auto).
+        assert_eq!(CodecPref::default(), CodecPref::Auto);
+    }
+
+    /// Each codec-preference video-caps string must be parseable by GStreamer
+    /// (guards against typos in the mapping that would silently no-op the
+    /// `video-caps` set in `build_pipeline`).
+    #[test]
+    fn codec_pref_video_caps_parse() {
+        // `Caps::from_str` requires an initialized GStreamer; `init` is idempotent
+        // and safe to call from a unit test.
+        let _ = gst::init();
+        for pref in [
+            CodecPref::Auto,
+            CodecPref::H264Preferred,
+            CodecPref::Vp8Only,
+            CodecPref::H264Only,
+        ] {
+            assert!(
+                gst::Caps::from_str(pref.video_caps()).is_ok(),
+                "video-caps for {pref:?} should parse"
+            );
+        }
+    }
+
+    /// The default 1080p baseline and common presets validate.
+    #[test]
+    fn valid_resolutions_accepted() {
+        assert!(validate_resolution(VIDEO_MAX_WIDTH, VIDEO_MAX_HEIGHT).is_ok());
+        assert!(validate_resolution(1280, 720).is_ok());
+        assert!(validate_resolution(3840, 2160).is_ok()); // 4K is within the edge bound
+        assert!(validate_resolution(RESOLUTION_MAX_EDGE, RESOLUTION_MAX_EDGE).is_ok());
+    }
+
+    /// Zero, odd, and oversized dimensions are rejected at the boundary.
+    #[test]
+    fn invalid_resolutions_rejected() {
+        assert!(validate_resolution(0, 1080).is_err(), "zero width");
+        assert!(validate_resolution(1920, 0).is_err(), "zero height");
+        assert!(validate_resolution(1921, 1080).is_err(), "odd width");
+        assert!(validate_resolution(1920, 1081).is_err(), "odd height");
+        assert!(
+            validate_resolution(RESOLUTION_MAX_EDGE + 2, 1080).is_err(),
+            "width beyond the edge bound"
+        );
+        assert!(
+            validate_resolution(1920, RESOLUTION_MAX_EDGE + 2).is_err(),
+            "height beyond the edge bound"
+        );
+    }
 
     /// A fresh failure within budget restarts as attempt 1 with the base backoff.
     #[test]
