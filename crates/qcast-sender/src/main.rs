@@ -105,6 +105,7 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/", get(index))
         .route("/client.js", get(client_js))
+        .route("/favicon.ico", get(favicon))
         .route("/ws", get(ws_handler))
         .with_state(state);
 
@@ -126,6 +127,10 @@ async fn client_js() -> impl IntoResponse {
         [(axum::http::header::CONTENT_TYPE, "application/javascript")],
         CLIENT_JS,
     )
+}
+
+async fn favicon() -> axum::http::StatusCode {
+    axum::http::StatusCode::NO_CONTENT
 }
 
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
