@@ -154,9 +154,9 @@ function startStreaming() {
   // Signalling runs on the host (webrtcsink), default port 8443, same host as this page.
   api = new GstWebRTCAPI({
     signalingServerUrl: `${location.protocol === "https:" ? "wss" : "ws"}://${location.hostname}:8443`,
-    // Force media through the TURN relay (coturn on the host). With both ends
+    // Force media through the host's in-process TURN relay. With both ends
     // relay-only, ICE has a single relay↔relay candidate pair — the most reliable
-    // transport, and it avoids a libnice nomination assertion that crashes the host
+    // transport, and it avoids a libnice nomination assertion that aborts the host
     // when the full host/srflx/mDNS/TCP candidate matrix races. (See host.rs.)
     webrtcConfig: {
       iceServers: [{

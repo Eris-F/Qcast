@@ -7,57 +7,85 @@ installer** (`.exe` via Inno Setup first; `.msi` via WiX optional later). The ex
 
 This file is the durable spec — safe to resume from after a context compaction.
 
+**Status at a glance** (details per section):
+
+| § | Deliverable | Status |
+|---|---|---|
+| 1 | Relocatable binary (embed web client + exe-relative plugin path) | **DONE** |
+| 2 | Linux AppImage | **BUILT + validated on Fedora 43** (core-libs bundling + cross-distro test are follow-ups) |
+| 3 | Windows bundled installer (Inno Setup) | **Recipe authored, untested on Windows** |
+| 4 | CI release pipeline | **Drafted, not yet run on GitHub Actions** |
+
 ---
 
 ## 0. Current state (what's already true)
 
-- Working, validated on Linux (Fedora 43 / GStreamer 1.26): capture → `videoscale`(1080p cap)
-  → `webrtcsink` (VP8-preferred, H.264 fallback), **in-process TURN relay** (`turn` crate, no
-  coturn), forced ICE relay, pre-launch egui GUI that closes to a background process, stop via
-  Ctrl+Alt+Q / kill. `--headless` path exists for tests.
+- Working, validated on Linux (Fedora 43 / GStreamer 1.26), incl. real WebRTC playback to
+  devices: capture → `videoscale`(1080p cap, configurable) → `webrtcsink` (VP8-preferred,
+  H.264 fallback; codec preference selectable), **in-process TURN relay** (`turn` crate, no
+  coturn), forced ICE relay, **self-supervising pipeline** (bounded auto-restart on
+  error/EOS, reuses the captured source so it never re-pops the picker), pre-launch egui GUI
+  (resolution + codec + viewer-password options) that closes to a background process, stop via
+  Ctrl+Alt+Q / kill. A **client-side viewer-password gate** runs in the browser (UX gate, not
+  signalling-enforced auth — future work). `--headless` path exists for tests.
 - `webrtcsink` comes from gst-plugins-rs (branch `0.15`), built with `cargo cbuild
-  -p gst-plugin-webrtc` → `libgstrswebrtc.so` / `gstrswebrtc.dll`.
-- Web client lives in `crates/qcast-sender/web-client/` and is referenced at runtime by
-  `WEB_CLIENT_DIR = concat!(env!("CARGO_MANIFEST_DIR"), "/web-client")` — an **absolute
-  compile-time path**.
+  -p gst-plugin-webrtc` → `libgstrswebrtc.so` / `gstrswebrtc.dll`. Congestion control
+  (`rtpgccbwe`) ships in the gst-plugins-rs RTP plugin (`libgstrsrtp.so`).
+- The web client (`crates/qcast-sender/web-client/`) is now **embedded into the binary** with
+  `include_dir` and extracted to a runtime dir at startup (see §1); `QCAST_WEB_CLIENT_DIR`
+  overrides it for live web-client development.
 
 ---
 
 ## 1. PREREQUISITE code change — make the binary relocatable (blocks ALL bundling)
 
-Two things assume the build tree exists at runtime. Both must be fixed before any bundle works
-on a machine that doesn't have the repo:
+> **STATUS: DONE.** Both halves are implemented (`crates/qcast-sender/src/host.rs` for the
+> embedded web client, `crates/qcast-sender/src/bundle.rs` for the exe-relative plugin path).
+> A copied binary runs outside the build tree.
 
-### 1a. Embed the web client into the binary
-`WEB_CLIENT_DIR` points at a path under the source tree — it won't exist for an end user.
-- **Fix (recommended):** embed `web-client/` with the `include_dir` crate
-  (`include_dir!("$CARGO_MANIFEST_DIR/web-client")`); at startup, extract it to a runtime dir
-  (e.g. `$XDG_CACHE_HOME/qcast/web-client` or a temp dir) and pass *that* path to
-  `webrtcsink web-server-directory=`.
-- Keeps the binary self-contained (one file works for AppImage and the Windows bundle).
-- Alternative: ship the dir next to the exe and resolve via `std::env::current_exe()`. Rejected —
-  less robust, more moving parts.
+Two things assumed the build tree existed at runtime. Both are now fixed so a bundle works on a
+machine that doesn't have the repo:
 
-### 1b. Find the bundled GStreamer plugins relative to the exe
+### 1a. Embed the web client into the binary — **done**
+The old `WEB_CLIENT_DIR` pointed at a path under the source tree — it wouldn't exist for an end
+user.
+- **Implemented:** `web-client/` is embedded with `include_dir`
+  (`include_dir!("$CARGO_MANIFEST_DIR/web-client")`) in `host.rs`; at startup it's extracted to
+  a fresh per-process temp dir (`qcast-web-<pid>`, cleaned up on shutdown) and *that* path is
+  passed to `webrtcsink web-server-directory=`. `session.json` (the access code) is written
+  there before the pipeline starts.
+- The binary is self-contained — one file works for the AppImage and the Windows bundle.
+- **Dev override:** `QCAST_WEB_CLIENT_DIR=<dir>` serves the client straight from that dir (no
+  extraction), so the web client can be edited live without recompiling.
+
+### 1b. Find the bundled GStreamer plugins relative to the exe — **done**
 A bundled app must locate `webrtcsink` (and friends) without a system GStreamer install.
-- **Fix:** before `gst::init()`, prepend exe-relative plugin dirs to `GST_PLUGIN_PATH`
-  (and set `GST_PLUGIN_SYSTEM_PATH_1_0` empty in the AppImage so it doesn't pick host plugins of
-  a mismatched version). Helper: `current_exe()` → resolve `../lib/gstreamer-1.0` (Linux) /
-  `.\` + `lib\gstreamer-1.0` (Windows) and `set_var` before init. Also set `GST_PLUGIN_SCANNER`
-  to the bundled scanner.
-- Make it a no-op when running from a normal dev build (so `cargo run` still uses the system /
-  user plugin dir). Gate on "are we inside a bundle" (e.g. an env var the AppRun/installer sets,
-  or detect a sibling `lib/gstreamer-1.0`).
+- **Implemented (`bundle.rs::configure_plugin_path`, called before `gst::init()`):** prepends
+  exe-relative plugin dirs to `GST_PLUGIN_PATH` (candidates, in order: `../lib/gstreamer-1.0`
+  for the AppImage `usr/bin`→`usr/lib` layout, `./lib/gstreamer-1.0` for the Windows app dir,
+  `./gstreamer-1.0` flat). It also points `GST_PLUGIN_SCANNER` at a bundled scanner if present.
+- It is a **strict no-op** when no sibling bundled plugin dir exists, so a normal `cargo run`
+  keeps using the system / user plugin dir untouched.
+- It clears `GST_PLUGIN_SYSTEM_PATH_1_0` (so a mismatched host GStreamer can't shadow the
+  bundled plugins) **only when `QCAST_BUNDLE=1`**. The AppRun sets this; on Windows a Start-Menu
+  shortcut can't set env vars, so see `deploy/windows/README.md` for the open item there.
 
-**Validation for step 1:** copy `target/release/qcast-sender` to an empty dir *outside* the repo
-and run it; it must still serve the web client and find webrtcsink (with the bundled plugin path
-wired). This proves relocatability before we wrap it.
+**Validation for step 1 (done):** a copied `target/release/qcast-sender` run from an empty dir
+outside the repo still serves the web client and finds webrtcsink.
 
 ---
 
 ## 2. Linux AppImage
 
-**Outcome:** `Qcast-x86_64.AppImage` — one executable file, no system deps, runs across distros.
+> **STATUS: BUILT + validated on Fedora 43.** `deploy/appimage/build-appimage.sh` produces a
+> working `Qcast-x86_64.AppImage` that runs on a typical desktop and serves real WebRTC.
+> A required fix landed during bring-up: the **webrtc (`webrtcbin`) plugin and `rtpgccbwe`
+> congestion control** must be bundled alongside our `libgstrswebrtc.so`, or webrtcsink fails
+> at runtime. **Honest follow-ups (not yet done):** (a) it still relies on the host's GStreamer
+> **core** runtime libraries — present on typical desktops, but full core-lib bundling is
+> tracked; (b) **cross-distro portability is unverified** — built and tested only on Fedora 43.
+
+**Outcome:** `Qcast-x86_64.AppImage` — one executable file, runs on a typical Linux desktop.
 
 **Tooling:** `linuxdeploy` + `linuxdeploy-plugin-gstreamer` (purpose-built to bundle the
 GStreamer libs + plugins + the plugin scanner and wire the env).
@@ -78,6 +106,14 @@ GStreamer libs + plugins + the plugin scanner and wire the env).
 5. Output + optionally GPG-sign the AppImage.
 
 **Gotchas / decisions**
+- **Bundle the webrtc plugin + congestion control (fixed).** Beyond our `libgstrswebrtc.so`,
+  the bundle MUST include the core **`webrtc`** plugin (`webrtcbin`, which webrtcsink drives)
+  and **`rtpgccbwe`** (Google Congestion Control, in the gst-plugins-rs RTP plugin
+  `libgstrsrtp.so`). Missing either makes webrtcsink fail at runtime in the AppImage even
+  though it works against the dev install. `build-appimage.sh` stages both explicitly.
+- **Core runtime libs (follow-up).** The current AppImage relies on the host's GStreamer
+  **core** runtime libraries (the typical-desktop assumption). Fully bundling them so it's
+  self-contained even on a bare system is a tracked follow-up.
 - **Do NOT bundle** libGL/mesa/driver libs or glibc — use the host's (linuxdeploy excludelist
   handles most). Bundling Mesa breaks GPU/driver matching for eframe/wgpu and VAAPI.
 - `pipewiresrc` + the xdg-desktop-portal are **host runtime services**, not bundled — present on
@@ -89,16 +125,25 @@ GStreamer libs + plugins + the plugin scanner and wire the env).
 - The in-process TURN relay needs no bundling (it's Rust, in the binary).
 - egui/wgpu: ships its own Rust code; relies on host Vulkan/GL — fine.
 
-**Test:** run on the dev box, then on a *different* distro or a clean container (e.g. an Ubuntu
-docker/VM with a desktop session) to prove portability.
+**Test:** validated on the dev box (Fedora 43). **Still to do:** run on a *different* distro or
+a clean container (e.g. an Ubuntu docker/VM with a desktop session) to prove portability —
+this is the open cross-distro item. The CI Linux job (see §4 / `deploy/CI.md`) runs the script
+on `ubuntu-latest` and is one way to shake this out.
 
 ---
 
 ## 3. Windows bundled installer (`.exe` first, `.msi` optional)
 
-**Outcome:** `Qcast-Setup.exe` — installs the prebuilt binary + the GStreamer runtime DLLs +
-plugins + our plugin; Start-Menu shortcut; **no winget / Rust / MSVC / compile** on the user's
-machine.
+> **STATUS: recipe authored, NOT yet built or tested on Windows.** The Inno Setup recipe lives
+> in `deploy/windows/` (`gather-payload.ps1` + `qcast.iss` + `README.md`); it was written on
+> Linux and the GStreamer MSVC payload can only be assembled on a Windows machine, so the
+> first run there is the validation. See `deploy/windows/README.md` for the build sequence,
+> the clean-VM test plan, and the open items (e.g. `QCAST_BUNDLE=1` and the Start-Menu
+> shortcut, runtime-`bin` trimming, plugin-DLL-name verification).
+
+**Outcome:** `Qcast-Setup-<version>.exe` — installs the prebuilt binary + the GStreamer runtime
+DLLs + plugins + our plugin; Start-Menu shortcut; **no winget / Rust / MSVC / compile** on the
+user's machine.
 
 **Build the payload first** (on a Windows build machine or a CI windows runner — can't be done
 from the Linux dev box):
@@ -137,24 +182,40 @@ Start Menu, confirm the GUI + a phone can view the stream.
 
 ## 4. CI release pipeline (underpins reproducible artifacts)
 
-GitHub Actions, on tag / release:
-- **linux job:** build binary + plugin → assemble AppDir → AppImage → upload to the Release.
-- **windows job:** build binary + plugin (MSVC) → gather GStreamer runtime → Inno → upload.
+> **STATUS: DRAFTED, not yet validated.** The workflow exists at
+> `.github/workflows/release.yml` but has **not been run on GitHub Actions** — treat the first
+> run (ideally a `workflow_dispatch`, not a tag) as the validation pass and expect to iterate.
+> Full details, per-job inputs, and the known first-run risks are in **`deploy/CI.md`**.
+
+GitHub Actions, on a `v*` tag (attaches artifacts to the Release) or `workflow_dispatch`
+(uploads build artifacts only):
+- **`linux-appimage` job (`ubuntu-latest`):** build binary + plugins → run
+  `deploy/appimage/build-appimage.sh` → `Qcast-x86_64.AppImage`. Note: the script bakes in
+  Fedora-toolchain workarounds and Fedora paths; the job overrides the GStreamer dirs for
+  Debian/Ubuntu but the rest is unverified there (see `deploy/CI.md` risk #1).
+- **`windows-installer` job (`windows-latest`):** build binary + plugin (MSVC) → gather the
+  GStreamer runtime via `gather-payload.ps1` → compile `qcast.iss` with `ISCC.exe` →
+  `Qcast-Setup-<ver>.exe`.
 - (later) macOS job → `.app` + GStreamer.framework.
+- Code signing is **not** wired yet (artifacts ship unsigned; the Windows installer will trip
+  SmartScreen) — see `deploy/CI.md` and `deploy/windows/README.md`.
+
 This replaces "build on the user's machine" with "download a prebuilt artifact" — the core win.
 
 ---
 
 ## 5. Sequencing
 
-1. **Step 1 (relocatable binary)** — embed web client + exe-relative plugin path. Test by
-   running a copied binary outside the repo. *This unblocks everything.*
-2. **Linux AppImage** — buildable + testable here. Produce, verify elements inside the bundle,
-   test on a second distro/container.
-3. **Windows installer** — needs a Windows machine/CI; build payload, write the Inno `.iss`,
-   produce + test on a clean Windows VM.
-4. **CI pipeline** to automate 2 + 3.
-5. **Signing** (Windows Authenticode, AppImage GPG; macOS notarization when macOS is added).
+1. **Step 1 (relocatable binary)** — embed web client + exe-relative plugin path. **DONE**
+   (a copied binary runs outside the repo).
+2. **Linux AppImage** — **DONE + validated on Fedora 43.** *Remaining:* test on a second
+   distro/container, and the core-runtime-lib bundling follow-up.
+3. **Windows installer** — recipe authored (`deploy/windows/`); **still needs** a Windows
+   machine/CI to build the payload and test on a clean Windows VM.
+4. **CI pipeline** to automate 2 + 3 — **drafted** (`.github/workflows/release.yml`,
+   `deploy/CI.md`); not yet run on GitHub Actions.
+5. **Signing** (Windows Authenticode, AppImage GPG; macOS notarization when macOS is added) —
+   **not started.**
 
 ## Licensing note
 We prefer **VP8** (royalty-free), so bundling avoids the H.264/openh264 (Cisco binary) licensing
