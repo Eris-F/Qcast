@@ -11,6 +11,20 @@ const setStatus = (s) => { statusEl.textContent = s; };
 // Signalling runs on the host (webrtcsink), default port 8443, same host as this page.
 const api = new GstWebRTCAPI({
   signalingServerUrl: `${location.protocol === "https:" ? "wss" : "ws"}://${location.hostname}:8443`,
+  // Force media through the host's TURN relay (coturn). This bypasses Wi-Fi
+  // client isolation and the host's Docker/veth/IPv6 ICE candidate clutter —
+  // the reason direct P2P wasn't establishing to phones/laptops.
+  webrtcConfig: {
+    iceServers: [{
+      urls: [
+        `turn:${location.hostname}:3478?transport=udp`,
+        `turn:${location.hostname}:3478?transport=tcp`,
+      ],
+      username: "qcast",
+      credential: "qcastpass",
+    }],
+    iceTransportPolicy: "relay",
+  },
 });
 
 let session = null;

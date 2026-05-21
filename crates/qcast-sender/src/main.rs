@@ -84,6 +84,10 @@ fn main() -> Result<()> {
         .downcast::<gst::Pipeline>()
         .map_err(|_| anyhow!("parsed description is not a pipeline"))?;
 
+    let lan_ip = primary_lan_ip()
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| args.host.clone());
+
     // Propose multiple codecs — each browser negotiates the best it supports
     // (H.264 for hardware decode on mobile, VP8 universally). Attach stream meta.
     if let Some(ws) = pipeline.by_name("ws") {
@@ -91,13 +95,19 @@ fn main() -> Result<()> {
             ws.set_property("video-caps", &caps);
         }
         ws.set_property("meta", gst::Structure::builder("meta").field("name", "qcast").build());
+
+        // Relay media through coturn on the host's reachable IP, bypassing P2P
+        // isolation and the Docker/veth/IPv6 candidate clutter. The client forces
+        // relay too (iceTransportPolicy). Drop the public STUN noise.
+        let turn_url = format!("turn://qcast:qcastpass@{lan_ip}:3478");
+        ws.set_property("turn-servers", gst::Array::new([turn_url]));
+        ws.set_property("stun-server", None::<String>);
     }
 
     pipeline.set_state(gst::State::Playing).context("set pipeline to Playing")?;
     tracing::info!(
         "qcast host serving — open  http://{}:{}/  on any device",
-        primary_lan_ip().map(|ip| ip.to_string()).unwrap_or_else(|| args.host.clone()),
-        args.web_port,
+        lan_ip, args.web_port,
     );
 
     // Run a glib main loop (keeps webrtcsink + its servers alive); log bus errors.
