@@ -1,0 +1,273 @@
+# =============================================================================
+# Qcast release pipeline  ***DRAFT — NOT YET RUN ON GITHUB ACTIONS***
+# =============================================================================
+# On a release tag (or a manual dispatch) this builds the two distributable
+# artifacts and, when run from a tag, attaches them to the GitHub Release:
+#
+#   * linux-appimage   -> Qcast-x86_64.AppImage   (deploy/appimage/build-appimage.sh)
+#   * windows-installer-> Qcast-Setup-<ver>.exe    (deploy/windows/gather-payload.ps1 + qcast.iss)
+#
+# It AUTOMATES the two build recipes that were validated locally. It does NOT
+# reinvent them — each job installs the dependencies those recipes assume and
+# then invokes the existing scripts as-is.
+#
+# -----------------------------------------------------------------------------
+# !!! FIRST-RUN CAVEATS — read deploy/CI.md before trusting a green check !!!
+# -----------------------------------------------------------------------------
+#  * AppImage: build-appimage.sh was validated on FEDORA 43. It encodes
+#    Fedora-toolchain workarounds (NO_STRIP, a patchelf DT_RELR repair pass,
+#    reduced codegen parallelism for a rustc crash) and DEFAULTS to Fedora paths
+#    (/usr/lib64/gstreamer-1.0, /usr/libexec/gstreamer-1.0). On ubuntu-latest the
+#    GStreamer dirs live elsewhere, so this job overrides GST_SYS_PLUGINS /
+#    GST_SYS_HELPERS for Debian/Ubuntu — but the rest of the script's Fedora
+#    assumptions are UNVERIFIED on Ubuntu. Expect this job to need Ubuntu-specific
+#    adjustment on the first real run. The script itself is intentionally NOT
+#    modified here (that would risk breaking the validated Fedora path).
+#  * Windows: gather-payload.ps1 / qcast.iss were AUTHORED on Linux and never run
+#    on Windows. The GStreamer-MSVC install, the Inno Setup install, and the
+#    plugin DLL names are all UNVERIFIED on the runner. Treat the first run as
+#    the validation pass.
+#  * Code signing is NOT wired (Authenticode for Windows, none for AppImage).
+#    Releases will be unsigned; see deploy/windows/README.md "Code signing".
+#
+# Use `workflow_dispatch` (Actions tab -> Run workflow) to shake this out BEFORE
+# cutting a real tag — see deploy/CI.md "How to iterate".
+# =============================================================================
+
+name: release
+
+on:
+  # Build + attach to the Release when a version tag is pushed (e.g. v0.1.0).
+  push:
+    tags:
+      - 'v*'
+  # Manual trigger for testing the pipeline without tagging. Produces artifacts
+  # only (no Release upload, since there is no tag).
+  workflow_dispatch:
+
+# Needed by softprops/action-gh-release to create/update the Release on a tag.
+permissions:
+  contents: write
+
+# One in-flight run per ref; a newer push supersedes an older queued run.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ===========================================================================
+  # LINUX — AppImage (ubuntu-latest)  *** DRAFT: Fedora-validated script ***
+  # ===========================================================================
+  linux-appimage:
+    name: Linux AppImage (DRAFT — Fedora-validated script on Ubuntu)
+    runs-on: ubuntu-latest
+    strategy:
+      # One OS failing must not kill the other job.
+      fail-fast: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # GStreamer dev + runtime stack. Package list mirrors the apt branch of
+      # deploy/setup-linux.sh (install_system_packages -> case "apt"). Capture
+      # plugins (pipewire/ximagesrc) are included so the curated AppImage set can
+      # find them; the build host does not need a display.
+      - name: Install GStreamer + build deps (apt — mirrors deploy/setup-linux.sh)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav \
+            gstreamer1.0-nice gstreamer1.0-pipewire libnice10 \
+            pipewire libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libssl-dev pkg-config build-essential git curl \
+            patchelf file desktop-file-utils \
+            libgstreamer-plugins-bad1.0-dev
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      # cargo-c provides `cargo cbuild`, used to build the C-ABI gst-plugins-rs
+      # plugins. Apt ships cargo-c on recent Ubuntu (fast path); fall back to a
+      # cargo install if the package is unavailable on the runner image.
+      - name: Install cargo-c
+        run: |
+          if ! cargo cbuild --help >/dev/null 2>&1; then
+            sudo apt-get install -y cargo-c || cargo install cargo-c
+          fi
+          cargo cbuild --help >/dev/null
+
+      # Build OUR plugins from gst-plugins-rs @ 0.15 (matches setup-linux.sh
+      # GST_PLUGINS_RS_REF / install_webrtcsink). webrtcsink (libgstrswebrtc.so)
+      # is REQUIRED; rtpgccbwe (libgstrsrtp.so, from gst-plugin-rtp) gives
+      # congestion control and is staged best-effort (the AppImage script only
+      # warns if it is missing).
+      - name: Build + install gst-plugins-rs (webrtcsink + rtpgccbwe)
+        run: |
+          set -euo pipefail
+          PLUGIN_DIR="$HOME/.local/share/gstreamer-1.0/plugins"
+          mkdir -p "$PLUGIN_DIR"
+          SRC="$HOME/.cache/qcast-build/gst-plugins-rs"
+          mkdir -p "$(dirname "$SRC")"
+          git clone --depth 1 --branch 0.15 \
+            https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git "$SRC"
+          # webrtcsink (required)
+          ( cd "$SRC" && cargo cbuild --release -p gst-plugin-webrtc )
+          WEBRTC_SO="$(find "$SRC/target" -name 'libgstrswebrtc.so' -printf '%T@ %p\n' \
+            | sort -nr | head -1 | cut -d' ' -f2-)"
+          test -n "$WEBRTC_SO" || { echo "libgstrswebrtc.so not produced"; exit 1; }
+          cp -f "$WEBRTC_SO" "$PLUGIN_DIR/libgstrswebrtc.so"
+          echo "installed $(basename "$WEBRTC_SO") -> $PLUGIN_DIR"
+          # rtpgccbwe (best-effort; the AppImage script tolerates its absence)
+          if ( cd "$SRC" && cargo cbuild --release -p gst-plugin-rtp ); then
+            RSRTP_SO="$(find "$SRC/target" -name 'libgstrsrtp.so' -printf '%T@ %p\n' \
+              | sort -nr | head -1 | cut -d' ' -f2-)"
+            if [ -n "$RSRTP_SO" ]; then
+              cp -f "$RSRTP_SO" "$PLUGIN_DIR/libgstrsrtp.so"
+              echo "installed $(basename "$RSRTP_SO") -> $PLUGIN_DIR"
+            else
+              echo "::warning::libgstrsrtp.so not produced — AppImage built without congestion control"
+            fi
+          else
+            echo "::warning::gst-plugin-rtp cbuild failed — AppImage built without congestion control"
+          fi
+
+      # Run the VALIDATED Fedora script as-is, but point its system-plugin/helper
+      # env knobs at the Debian/Ubuntu locations (it defaults to Fedora's
+      # /usr/lib64 + /usr/libexec). Everything else is left to the script.
+      # DRAFT: the script's Fedora-toolchain workarounds are unverified on Ubuntu.
+      - name: Build the AppImage (deploy/appimage/build-appimage.sh — DRAFT on Ubuntu)
+        env:
+          # Debian/Ubuntu multiarch GStreamer plugin + helper dirs (vs Fedora
+          # /usr/lib64, /usr/libexec which the script defaults to).
+          GST_SYS_PLUGINS: /usr/lib/x86_64-linux-gnu/gstreamer-1.0
+          GST_SYS_HELPERS: /usr/lib/x86_64-linux-gnu/gstreamer1.0/gstreamer-1.0
+        run: |
+          set -euo pipefail
+          # Sanity-check the Ubuntu GStreamer dirs before invoking the script,
+          # so a path mismatch is an obvious failure here rather than deep inside.
+          test -d "$GST_SYS_PLUGINS" || { echo "::error::GStreamer plugin dir not found at $GST_SYS_PLUGINS — adjust GST_SYS_PLUGINS for this runner"; exit 1; }
+          test -d "$GST_SYS_HELPERS" || { echo "::error::GStreamer helpers dir not found at $GST_SYS_HELPERS — adjust GST_SYS_HELPERS for this runner"; exit 1; }
+          bash deploy/appimage/build-appimage.sh
+
+      - name: Locate the AppImage
+        id: appimage
+        run: |
+          set -euo pipefail
+          OUT="deploy/appimage/build/Qcast-x86_64.AppImage"
+          test -f "$OUT" || { echo "::error::AppImage not found at $OUT"; exit 1; }
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
+
+      # Always upload as a build artifact (works for tag AND workflow_dispatch).
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Qcast-AppImage
+          path: ${{ steps.appimage.outputs.path }}
+          if-no-files-found: error
+
+      # On a tag, also attach it to the GitHub Release.
+      - name: Attach AppImage to Release (tag only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.appimage.outputs.path }}
+          fail_on_unmatched_files: true
+
+  # ===========================================================================
+  # WINDOWS — Inno Setup installer (windows-latest)  *** DRAFT: never run on Win ***
+  # ===========================================================================
+  windows-installer:
+    name: Windows installer (DRAFT — recipe never run on Windows)
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # GStreamer 1.26.x MSVC RUNTIME + DEVEL via Chocolatey. DRAFT: choco
+      # 'gstreamer'/'gstreamer-devel' install + the version pin are UNVERIFIED on
+      # the runner. The MSI alternative (silent install of both the runtime and
+      # devel MSIs from gstreamer.freedesktop.org with ADDLOCAL=ALL) is documented
+      # in deploy/windows/README.md if choco proves unreliable.
+      - name: Install GStreamer MSVC (runtime + devel) via choco — DRAFT
+        shell: pwsh
+        run: |
+          choco install gstreamer --version=1.26.0 -y --no-progress
+          choco install gstreamer-devel --version=1.26.0 -y --no-progress
+          # The GStreamer MSI normally sets GSTREAMER_1_0_ROOT_MSVC_X86_64; the
+          # choco package may not export it to subsequent steps. Pin it explicitly
+          # to the conventional root so gather-payload.ps1 resolves the runtime.
+          $root = "C:\gstreamer\1.0\msvc_x86_64"
+          "GSTREAMER_1_0_ROOT_MSVC_X86_64=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "$root\bin"                            | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Install Rust (stable, MSVC toolchain)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install cargo-c
+        shell: pwsh
+        run: |
+          cargo install cargo-c
+          cargo cbuild --help | Out-Null
+
+      # Clone gst-plugins-rs @ 0.15 to the location gather-payload.ps1 defaults to
+      # (%USERPROFILE%\.cache\qcast-build\gst-plugins-rs). gather-payload.ps1 then
+      # runs `cargo cbuild --release -p gst-plugin-webrtc` itself and locates the
+      # produced gstrswebrtc.dll.
+      - name: Clone gst-plugins-rs (@ 0.15) for the webrtcsink build
+        shell: pwsh
+        run: |
+          $src = Join-Path $env:USERPROFILE ".cache\qcast-build\gst-plugins-rs"
+          New-Item -ItemType Directory -Force -Path (Split-Path $src) | Out-Null
+          git clone --depth 1 --branch 0.15 `
+            https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git $src
+
+      # Build the exe + gstrswebrtc.dll and stage the full payload (runtime DLLs,
+      # curated plugins, scanner). This is the VALIDATED-on-Linux-only recipe;
+      # it builds cargo + cargo-c itself. DRAFT: never executed on Windows.
+      - name: Assemble Windows payload (deploy/windows/gather-payload.ps1 — DRAFT)
+        shell: pwsh
+        run: deploy\windows\gather-payload.ps1
+
+      # Inno Setup 6 provides ISCC.exe (the CLI compiler).
+      - name: Install Inno Setup via choco — DRAFT
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      # Compile the installer. AppVersion is pinned to crates/qcast-sender's
+      # version (0.1.0); keep them in sync (see qcast.iss / README.md). Output:
+      # deploy\windows\Output\Qcast-Setup-<ver>.exe.
+      - name: Compile installer with ISCC (deploy/windows/qcast.iss)
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc — adjust the Inno Setup path for this runner" }
+          & $iscc "deploy\windows\qcast.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC.exe exited with code $LASTEXITCODE" }
+
+      - name: Locate the installer
+        id: installer
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path "deploy\windows\Output" -Filter "Qcast-Setup-*.exe" -File `
+            | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $exe) { throw "No Qcast-Setup-*.exe found under deploy\windows\Output" }
+          "path=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Qcast-Windows-Installer
+          path: ${{ steps.installer.outputs.path }}
+          if-no-files-found: error
+
+      - name: Attach installer to Release (tag only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.installer.outputs.path }}
+          fail_on_unmatched_files: true
