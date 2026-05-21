@@ -112,10 +112,23 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(&args.listen)
         .await
         .with_context(|| format!("binding {}", args.listen))?;
-    tracing::info!(listen = %args.listen,
-        "qcast host serving — open http://<host>:<port>/ in any browser");
+    let port = args.listen.rsplit(':').next().unwrap_or("8080");
+    match primary_lan_ip() {
+        Some(ip) => tracing::info!(
+            "qcast host serving — open  http://{ip}:{port}/  on any device (this machine: http://127.0.0.1:{port}/)"
+        ),
+        None => tracing::info!("qcast host serving — open http://<host>:{port}/ in any browser"),
+    }
     axum::serve(listener, app).await.context("axum serve")?;
     Ok(())
+}
+
+/// Best-effort primary LAN IP, so the startup log prints a URL reachable from
+/// other devices (phone/tablet). Uses a connected UDP socket — no packets sent.
+fn primary_lan_ip() -> Option<std::net::IpAddr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("8.8.8.8:80").ok()?;
+    sock.local_addr().ok().map(|addr| addr.ip())
 }
 
 async fn index() -> Html<&'static str> {
