@@ -123,7 +123,7 @@ install_system_packages() {
         pipewire pipewire-gstreamer \
         libva libva-utils mesa-va-drivers intel-media-driver \
         gstreamer1-devel gstreamer1-plugins-base-devel \
-        cargo-c git gcc pkgconf-pkg-config openssl-devel \
+        cargo-c git gcc gcc-c++ make pkgconf-pkg-config openssl-devel \
         xdg-desktop-portal
       # openh264 (software H.264) lives in the fedora-cisco repo.
       pkg_install gstreamer1-plugin-openh264 || warn "openh264 plugin optional"
@@ -149,7 +149,7 @@ install_system_packages() {
         gstreamer gstreamer-plugins-base gstreamer-plugins-good \
         gstreamer-plugins-bad gstreamer-plugins-ugly gstreamer-plugins-libav \
         gstreamer-plugin-pipewire libnice2 pipewire \
-        libgstreamer-1_0-0-devel cargo-c git gcc pkg-config \
+        libgstreamer-1_0-0-devel cargo-c git gcc gcc-c++ make pkg-config \
         libopenssl-devel xdg-desktop-portal
       ;;
   esac

@@ -11,13 +11,19 @@
   Duplication), bundled in the GStreamer runtime below.
 
   What it does:
-    1. Installs the GStreamer MSVC runtime + development MSIs (all plugins).
-    2. Installs the Rust toolchain (rustup) if missing.
-    3. Installs cargo-c (builds the C-ABI webrtcsink plugin from Rust).
-    4. Builds the gst-plugins-rs webrtc plugin and drops it in the plugin dir
+    1. Installs Git if missing (winget, or the GitHub installer as fallback).
+    2. Installs the MSVC C++ build tools if missing (VS 2022 Build Tools, VCTools
+       workload) - required by the Rust MSVC toolchain and cargo-c. Unattended.
+    3. Installs the GStreamer MSVC runtime + development MSIs (all plugins).
+    4. Installs the Rust toolchain (rustup) if missing.
+    5. Installs cargo-c (builds the C-ABI webrtcsink plugin from Rust).
+    6. Builds the gst-plugins-rs webrtc plugin and drops it in the plugin dir
        (only if webrtcsink isn't already present).
-    5. Builds the Qcast host (cargo build --release).
-    6. Verifies every required GStreamer element is available.
+    7. Builds the Qcast host (cargo build --release).
+    8. Verifies every required GStreamer element is available.
+
+  Git and the C++ build tools install automatically and unattended (no prompts);
+  both are large-ish but run in the background while the script waits.
 
   Usage (elevated PowerShell, from the repo root):
       powershell -ExecutionPolicy Bypass -File deploy\setup-windows.ps1
@@ -56,11 +62,37 @@ function Retry([scriptblock]$Action){
   }
 }
 
+function Have-Command($name){ [bool](Get-Command $name -ErrorAction SilentlyContinue) }
+function Have-Winget(){ Have-Command winget }
+
+# Re-read PATH from the registry so binaries installed during this run (git,
+# cargo, …) become callable without opening a new shell.
+function Refresh-Path(){
+  $machine = [Environment]::GetEnvironmentVariable("Path","Machine")
+  $user    = [Environment]::GetEnvironmentVariable("Path","User")
+  $env:Path = "$machine;$user"
+}
+
 function Have-Element($name){
   $gi = Get-Command gst-inspect-1.0.exe -ErrorAction SilentlyContinue
   if(-not $gi){ return $false }
   & $gi.Source $name 1>$null 2>$null
   return ($LASTEXITCODE -eq 0)
+}
+
+# Is the MSVC C++ toolchain (linker + Windows SDK) installed? Rust's MSVC
+# toolchain and cargo-c/webrtcsink can't build without it. We detect it via
+# vswhere (the VS Installer's locator) requiring the VC.Tools component, and
+# fall back to a bare cl.exe-on-PATH check.
+function Have-BuildTools(){
+  $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+  if(Test-Path $vswhere){
+    $found = & $vswhere -products * -latest `
+      -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+      -property installationPath 2>$null
+    if($found){ return $true }
+  }
+  return (Have-Command cl)
 }
 
 # GStreamer install root for the MSVC build (set by the MSI; we also set it so the
@@ -74,6 +106,57 @@ function Add-ToPath($dir){
   if(Test-Path $dir){
     if($env:PATH -notlike "*$dir*"){ $env:PATH = "$dir;$env:PATH" }
   }
+}
+
+# ---------------------------------------------------------------------------
+# 0a. Git (needed to clone gst-plugins-rs for the webrtcsink build)
+# ---------------------------------------------------------------------------
+function Ensure-Git(){
+  Step "Ensuring Git"
+  if(Have-Command git){ Ok "git present: $(git --version)"; return }
+  Info "git not found — installing automatically…"
+  if(Have-Winget){
+    Retry { winget install --id Git.Git -e --silent `
+      --accept-package-agreements --accept-source-agreements }
+  } else {
+    # No winget (older Windows): pull the latest Git-for-Windows 64-bit installer
+    # from the GitHub API and run it unattended.
+    Info "winget unavailable — fetching Git for Windows from GitHub…"
+    $rel = Invoke-RestMethod "https://api.github.com/repos/git-for-windows/git/releases/latest" `
+      -Headers @{ "User-Agent" = "qcast-setup" }
+    $asset = $rel.assets | Where-Object { $_.name -match '64-bit\.exe$' } | Select-Object -First 1
+    if(-not $asset){ Die "could not locate a Git for Windows installer asset" }
+    $exe = Join-Path $env:TEMP $asset.name
+    Retry { Invoke-WebRequest $asset.browser_download_url -OutFile $exe -UseBasicParsing }
+    Retry { Start-Process $exe -Wait -ArgumentList "/VERYSILENT /NORESTART /SP-" }
+  }
+  Refresh-Path
+  if(-not (Have-Command git)){ Die "git still not on PATH after install (open a new shell and re-run)" }
+  Ok "installed: $(git --version)"
+}
+
+# ---------------------------------------------------------------------------
+# 0b. MSVC C++ build tools (Rust MSVC toolchain + cargo-c/webrtcsink need them)
+# ---------------------------------------------------------------------------
+function Ensure-BuildTools(){
+  Step "Ensuring Visual C++ build tools (MSVC)"
+  if(Have-BuildTools){ Ok "Visual C++ build tools present"; return }
+  Info "not found — installing VS 2022 Build Tools (C++ workload) automatically."
+  Info "this is a large download (a few GB) and runs unattended; please wait…"
+  $vsArgs = "--quiet --wait --norestart --nocache " +
+            "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+  if(Have-Winget){
+    Retry { winget install --id Microsoft.VisualStudio.2022.BuildTools -e --silent `
+      --accept-package-agreements --accept-source-agreements --override "$vsArgs" }
+  } else {
+    # Stable bootstrapper URL — works without winget.
+    $bt = Join-Path $env:TEMP "vs_BuildTools.exe"
+    Retry { Invoke-WebRequest "https://aka.ms/vs/17/release/vs_BuildTools.exe" -OutFile $bt -UseBasicParsing }
+    Retry { Start-Process $bt -Wait -ArgumentList $vsArgs }
+  }
+  Refresh-Path
+  if(Have-BuildTools){ Ok "Visual C++ build tools installed" }
+  else { Warn "build-tools install finished but VCTools wasn't detected — a reboot may be needed before building" }
 }
 
 # ---------------------------------------------------------------------------
@@ -201,6 +284,8 @@ function Verify-Install(){
 
 # ---------------------------------------------------------------------------
 if($Verify){ Verify-Install; exit 0 }
+Ensure-Git
+Ensure-BuildTools
 Install-GStreamer
 Ensure-Rust
 Ensure-CargoC
