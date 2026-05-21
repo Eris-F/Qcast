@@ -92,19 +92,48 @@ detect_distro() {
 }
 
 SUDO=""
-need_sudo() { [[ $EUID -ne 0 ]] && SUDO="sudo"; }
+# Pick `sudo` only when we're not already root. Written as an if (not
+# `[[ ... ]] && SUDO=sudo`) on purpose: under `set -e`, the && form returns the
+# failed test's nonzero status when running AS root, which would abort the whole
+# script before any work is done. The if always returns 0.
+need_sudo() {
+  if [[ $EUID -ne 0 ]]; then
+    SUDO="sudo"
+    command -v sudo >/dev/null 2>&1 \
+      || die "not running as root and 'sudo' is not installed — re-run as root, or install sudo first"
+  else
+    SUDO=""
+  fi
+}
 
 pkg_install() {
   # Install a list of packages; missing-package errors are tolerated per-distro
   # because names differ across versions (we verify elements at the end anyway).
+  # IMPORTANT: the final verify() is the strict guard — a tolerated install
+  # failure here only matters if it leaves a *required* element missing, which
+  # verify will then catch and explain. We never let a flaky/partial install
+  # abort the whole run, but we also never claim success it didn't earn.
   local pkgs=("$@")
+  # $SUDO is intentionally unquoted so it word-splits to nothing when running as
+  # root (need_sudo leaves it empty) and to `sudo` otherwise.
+  # shellcheck disable=SC2086
   case "$PKG" in
-    dnf)    retry $SUDO dnf install -y --skip-unavailable "${pkgs[@]}" \
-              || retry $SUDO dnf install -y "${pkgs[@]}" || true ;;
+    # dnf5 (Fedora 41+) and dnf4 both accept --skip-unavailable on `install`,
+    # so unknown/renamed names are dropped instead of failing the batch. No
+    # second "plain install" fallback: re-running without --skip-unavailable
+    # would just hard-fail on the first missing name and be swallowed by
+    # `|| true`, hiding nothing useful. One tolerant pass is enough.
+    dnf)    retry $SUDO dnf install -y --skip-unavailable --skip-broken "${pkgs[@]}" || true ;;
     apt)    retry $SUDO apt-get update -y || true
             retry $SUDO apt-get install -y --no-install-recommends "${pkgs[@]}" || true ;;
+    # NOTE: `-Sy` (refresh without a full `-Syu`) risks an Arch partial-upgrade
+    # if the mirror has moved on; on a fresh machine that's rare. If a dependency
+    # version mismatch appears, run `sudo pacman -Syu` once, then re-run this.
     pacman) retry $SUDO pacman -Sy --needed --noconfirm "${pkgs[@]}" || true ;;
-    zypper) retry $SUDO zypper --non-interactive install -y "${pkgs[@]}" || true ;;
+    # `--ignore-unknown` is the zypper analogue of dnf's --skip-unavailable: a
+    # name that doesn't exist (renamed/optional) is dropped instead of aborting
+    # the whole batch. Without it one bad name leaves NOTHING installed.
+    zypper) retry $SUDO zypper --non-interactive --ignore-unknown install --no-recommends "${pkgs[@]}" || true ;;
   esac
 }
 
@@ -115,26 +144,39 @@ install_system_packages() {
   step "Installing GStreamer + capture + TURN + build dependencies"
   case "$PKG" in
     dnf)
+      # NOTE on package names (Fedora 43, dnf5):
+      #  - libav plugin is `gstreamer1-plugin-libav` (there is NO `gstreamer1-libav`).
+      #  - VAAPI elements (vah264enc, vah264lpenc) come from `gstreamer1-plugins-bad-free`.
+      #  - `intel-media-driver` (the iHD VAAPI driver for the Intel laptop target)
+      #    lives in RPM Fusion *nonfree*, which is not enabled on a stock Fedora.
+      #    If absent it is simply skipped; software encode still works, and the
+      #    informational "Hardware H.264 encoder" check will note it.
       pkg_install \
         gstreamer1 gstreamer1-plugins-base gstreamer1-plugins-good \
         gstreamer1-plugins-bad-free gstreamer1-plugins-bad-free-extras \
-        gstreamer1-plugins-ugly-free gstreamer1-libav \
-        gstreamer1-plugin-libav libnice libnice-gstreamer1 \
+        gstreamer1-plugins-ugly-free gstreamer1-plugin-libav \
+        libnice libnice-gstreamer1 \
         pipewire pipewire-gstreamer \
         libva libva-utils mesa-va-drivers intel-media-driver \
         gstreamer1-devel gstreamer1-plugins-base-devel \
-        cargo-c git gcc gcc-c++ make pkgconf-pkg-config openssl-devel \
+        cargo-c git curl gcc gcc-c++ make pkgconf-pkg-config openssl-devel \
         xdg-desktop-portal
-      # openh264 (software H.264) lives in the fedora-cisco repo.
+      # openh264 (software H.264) lives in the fedora-cisco-openh264 repo, which
+      # ships enabled on Fedora but may be off on RHEL/CentOS. Optional.
       pkg_install gstreamer1-plugin-openh264 || warn "openh264 plugin optional"
       ;;
     apt)
+      # NOTE: `gstreamer1.0-nice` (the ICE plugin providing nicesink) is in the
+      # *universe* component on Ubuntu; if it can't be found, enable universe
+      # (`sudo add-apt-repository universe`) and re-run. `cargo-c` is packaged on
+      # recent Debian/Ubuntu — installing it here is far faster than the
+      # `cargo install cargo-c` fallback in ensure_cargo_c().
       pkg_install \
         gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
         gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav \
         gstreamer1.0-nice gstreamer1.0-pipewire libnice10 \
         pipewire libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-        libssl-dev pkg-config build-essential git \
+        libssl-dev pkg-config build-essential git curl cargo-c \
         va-driver-all intel-media-va-driver xdg-desktop-portal
       ;;
     pacman)
@@ -142,15 +184,29 @@ install_system_packages() {
         gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad \
         gst-plugins-ugly gst-libav gst-plugin-pipewire libnice pipewire \
         openh264 libva-utils intel-media-driver \
-        cargo-c git base-devel pkgconf openssl xdg-desktop-portal
+        cargo-c git curl base-devel pkgconf openssl xdg-desktop-portal
       ;;
     zypper)
+      # NOTE on openSUSE package names (verified against the Tumbleweed OSS repo):
+      #  - The GStreamer ICE plugin that provides `nicesink` is `gstreamer-libnice`
+      #    (a separate package); the bare `libnice` library alone does NOT ship the
+      #    GStreamer element, so it must be listed explicitly.
+      #  - Core build headers (gstreamer-1.0.pc) come from `gstreamer-devel`; the
+      #    app/audio/video .pc files gstreamer-rs needs come from
+      #    `gstreamer-plugins-base-devel`. There is NO `libgstreamer-1_0-0-devel`.
+      #  - VA driver + openh264 are optional accel/codec extras (tolerated if absent).
       pkg_install \
         gstreamer gstreamer-plugins-base gstreamer-plugins-good \
         gstreamer-plugins-bad gstreamer-plugins-ugly gstreamer-plugins-libav \
-        gstreamer-plugin-pipewire libnice2 pipewire \
-        libgstreamer-1_0-0-devel cargo-c git gcc gcc-c++ make pkg-config \
-        libopenssl-devel xdg-desktop-portal
+        gstreamer-plugin-pipewire gstreamer-libnice libnice pipewire \
+        gstreamer-devel gstreamer-plugins-base-devel \
+        cargo-c git curl gcc gcc-c++ make pkg-config libopenssl-devel \
+        libva libva-utils intel-media-driver xdg-desktop-portal
+      # openh264 (software H.264) is optional; name varies, tolerate if absent.
+      # (On openSUSE full VA-API codec support often needs the Packman repo; the
+      # verify step never *requires* hardware accel, so a missing driver only
+      # affects the informational "Hardware H.264 encoder" line.)
+      pkg_install gstreamer-plugin-openh264 || warn "openh264 plugin optional"
       ;;
   esac
   ok "system packages requested (missing optional ones are tolerated)"
@@ -166,12 +222,26 @@ ensure_rust() {
     return
   fi
   info "installing Rust via rustup (no sudo, into ~/.cargo)…"
-  retry curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup.sh \
-    || die "could not download rustup"
-  sh /tmp/rustup.sh -y --no-modify-path || die "rustup install failed"
+  command -v curl >/dev/null 2>&1 \
+    || die "curl is required to fetch rustup but isn't installed — install it (it's in the package list; a skipped/failed system-package step may be why) and re-run"
+  # Download over TLS1.2+/HTTPS-only first (the official one-liner pipes curl
+  # straight into sh; we fetch to a file so the same proto guard applies and the
+  # script is inspectable). rustup ships no published checksum for the bootstrap
+  # shim, so we rely on the TLS-verified HTTPS transport from the official host.
+  local rustup_sh
+  rustup_sh="$(mktemp /tmp/rustup.XXXXXX.sh)" || die "could not create temp file"
+  retry curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o "$rustup_sh" \
+    || { rm -f "$rustup_sh"; die "could not download rustup from https://sh.rustup.rs"; }
+  sh "$rustup_sh" -y --no-modify-path || { rm -f "$rustup_sh"; die "rustup install failed"; }
+  rm -f "$rustup_sh"
+  # rustup was run with --no-modify-path, so the current (non-login) shell won't
+  # have ~/.cargo/bin yet. Source its env if present, and add the dir explicitly
+  # so the rest of this run can call cargo without opening a new shell.
   # shellcheck disable=SC1091
-  source "${HOME}/.cargo/env"
-  command -v cargo >/dev/null || die "cargo still not on PATH after rustup"
+  [[ -r "${HOME}/.cargo/env" ]] && . "${HOME}/.cargo/env"
+  case ":${PATH}:" in *":${HOME}/.cargo/bin:"*) : ;; *) PATH="${HOME}/.cargo/bin:${PATH}" ;; esac
+  export PATH
+  command -v cargo >/dev/null || die "cargo still not on PATH after rustup (try: source \$HOME/.cargo/env, then re-run)"
   ok "installed: $(cargo --version)"
 }
 
@@ -206,26 +276,32 @@ install_webrtcsink() {
   mkdir -p "$BUILD_DIR"
   local src="${BUILD_DIR}/gst-plugins-rs"
   if [[ -d "$src/.git" ]]; then
-    info "reusing clone at $src"
-    git -C "$src" fetch --depth 1 origin "$GST_PLUGINS_RS_REF" 2>/dev/null \
-      && git -C "$src" checkout -q FETCH_HEAD || true
+    info "reusing clone at $src — refreshing to ${GST_PLUGINS_RS_REF}"
+    if git -C "$src" fetch --depth 1 origin "$GST_PLUGINS_RS_REF" 2>/dev/null; then
+      git -C "$src" checkout -q FETCH_HEAD || warn "could not check out FETCH_HEAD; building whatever is checked out"
+    else
+      warn "could not fetch ${GST_PLUGINS_RS_REF} (offline?); building the existing checkout"
+    fi
   else
+    # Prefer the pinned branch; fall back to the default branch only if the
+    # branch clone fails (e.g. transient mirror issue), so we still get *a* build.
     retry git clone --depth 1 --branch "$GST_PLUGINS_RS_REF" \
       https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git "$src" \
       || retry git clone --depth 1 \
         https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs.git "$src" \
-      || die "could not clone gst-plugins-rs"
+      || die "could not clone gst-plugins-rs from gitlab.freedesktop.org (check network/HTTPS access)"
   fi
 
   mkdir -p "$PLUGIN_DIR"
   ( cd "$src" && retry cargo cbuild --release -p gst-plugin-webrtc ) \
-    || die "cargo cbuild of gst-plugin-webrtc failed"
+    || die "cargo cbuild of gst-plugin-webrtc failed — see the cargo error above (commonly a missing devel header or no C compiler)"
 
+  # Pick the newest matching artifact (a re-run may leave several under target/).
   local so
   so="$(find "$src/target" -name 'libgstrswebrtc.so' -printf '%T@ %p\n' 2>/dev/null \
         | sort -nr | head -1 | cut -d' ' -f2-)"
-  [[ -n "$so" ]] || die "build succeeded but libgstrswebrtc.so not found"
-  cp -f "$so" "$PLUGIN_DIR/" || die "could not copy plugin to $PLUGIN_DIR"
+  [[ -n "$so" ]] || die "cargo cbuild reported success but libgstrswebrtc.so was not found under $src/target"
+  cp -f "$so" "$PLUGIN_DIR/" || die "could not copy plugin to $PLUGIN_DIR (check permissions / disk space)"
   ok "installed $(basename "$so") -> $PLUGIN_DIR"
 
   have_element webrtcsink \
@@ -249,40 +325,63 @@ build_qcast() {
 # ----------------------------------------------------------------------------
 verify() {
   step "Verifying the installation"
+  if ! command -v gst-inspect-1.0 >/dev/null 2>&1; then
+    die "gst-inspect-1.0 is not on PATH — the GStreamer base package isn't installed (or its bin dir isn't in PATH). Install GStreamer and re-run."
+  fi
   local missing=0
 
-  # Critical GStreamer elements.
-  local required=(webrtcsink videoconvert videoscale vp8enc rtpbin)
+  # Critical GStreamer elements. webrtcbin is included because the host's own
+  # preflight (missing_webrtc_support) requires it alongside webrtcsink.
+  local required=(webrtcsink webrtcbin videoconvert videoscale vp8enc rtpbin)
   for el in "${required[@]}"; do
     if have_element "$el"; then ok "element: $el"; else warn "MISSING element: $el"; missing=1; fi
   done
 
   # WebRTC transport elements (provided by libnice + GStreamer).
   for el in nicesink dtlsenc srtpenc; do
-    if have_element "$el"; then ok "element: $el"; else warn "MISSING element: $el (install libnice GStreamer plugin)"; missing=1; fi
+    if have_element "$el"; then ok "element: $el"; else warn "MISSING element: $el (install the libnice GStreamer plugin)"; missing=1; fi
   done
 
-  # At least one screen-capture source.
-  if have_element pipewiresrc || have_element ximagesrc; then
-    ok "capture source: $(have_element pipewiresrc && echo pipewiresrc || echo ximagesrc)"
+  # At least one screen-capture source (Wayland portal first, X11 fallback).
+  local cap=""
+  if   have_element pipewiresrc; then cap=pipewiresrc
+  elif have_element ximagesrc;   then cap=ximagesrc
+  fi
+  if [[ -n "$cap" ]]; then
+    ok "capture source: $cap"
   else
     warn "MISSING screen capture source (pipewiresrc/ximagesrc)"; missing=1
   fi
 
+  # If webrtcsink is the thing missing but we DID build & copy the plugin, the
+  # current shell most likely just hasn't picked up the user plugin dir yet.
+  if ! have_element webrtcsink && [[ -e "${PLUGIN_DIR}/libgstrswebrtc.so" ]]; then
+    warn "libgstrswebrtc.so is present in ${PLUGIN_DIR} but webrtcsink isn't loading."
+    warn "Open a fresh shell (the user plugin dir is a GStreamer default), or set:"
+    warn "  export GST_PLUGIN_PATH=\"${PLUGIN_DIR}:\${GST_PLUGIN_PATH}\""
+  fi
+
   # (TURN relay is built into Qcast — no external coturn needed.)
 
-  # The built binary.
-  if [[ -x "${REPO_ROOT}/target/release/qcast-sender" ]]; then
-    ok "qcast-sender binary present"
+  # The built binary. We normally build release, but a developer may have only a
+  # debug build (cargo build without --release) — accept either so --verify is
+  # useful before/without a release build.
+  local rel="${REPO_ROOT}/target/release/qcast-sender"
+  local dbg="${REPO_ROOT}/target/debug/qcast-sender"
+  if   [[ -x "$rel" ]]; then ok "qcast-sender binary present (release)"; QCAST_BIN="$rel"
+  elif [[ -x "$dbg" ]]; then ok "qcast-sender binary present (debug)";   QCAST_BIN="$dbg"
+  elif (( ONLY_VERIFY )); then
+    # --verify is for checking the environment; not having built yet is expected.
+    warn "qcast-sender binary not built yet (run without --verify, or 'cargo build --release -p qcast-sender')"
   elif (( DO_BUILD )); then
-    warn "qcast-sender binary missing"; missing=1
+    warn "qcast-sender binary missing after build"; missing=1
   fi
 
   if (( missing )); then
     die "verification found missing components (see ! lines above). Re-run after installing them, or check your distro's package names."
   fi
-  printf '\n%s✔ Qcast is ready.%s  Run:  %s%s/target/release/qcast-sender%s\n' \
-    "$GRN$BOLD" "$RST" "$BOLD" "$REPO_ROOT" "$RST"
+  printf '\n%s✔ Qcast is ready.%s  Run:  %s%s%s\n' \
+    "$GRN$BOLD" "$RST" "$BOLD" "${QCAST_BIN:-${REPO_ROOT}/target/release/qcast-sender}" "$RST"
 }
 
 # ----------------------------------------------------------------------------
