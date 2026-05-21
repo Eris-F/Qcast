@@ -11,9 +11,10 @@ const setStatus = (s) => { statusEl.textContent = s; };
 // Signalling runs on the host (webrtcsink), default port 8443, same host as this page.
 const api = new GstWebRTCAPI({
   signalingServerUrl: `${location.protocol === "https:" ? "wss" : "ws"}://${location.hostname}:8443`,
-  // Force media through the host's TURN relay (coturn). This bypasses Wi-Fi
-  // client isolation and the host's Docker/veth/IPv6 ICE candidate clutter —
-  // the reason direct P2P wasn't establishing to phones/laptops.
+  // Force media through the TURN relay (coturn on the host). With both ends
+  // relay-only, ICE has a single relay↔relay candidate pair — the most reliable
+  // transport, and it avoids a libnice nomination assertion that crashes the host
+  // when the full host/srflx/mDNS/TCP candidate matrix races. (See host.rs.)
   webrtcConfig: {
     iceServers: [{
       urls: [

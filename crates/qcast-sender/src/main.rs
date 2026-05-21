@@ -1,28 +1,20 @@
-//! Qcast host. Captures the desktop and serves it to browsers via gst-plugins-rs
-//! `webrtcsink`, which encodes once and serves many consumers with per-consumer
-//! congestion control + adaptive bitrate, codec negotiation, and loss recovery
-//! (RTX/FEC) — and runs the signalling + web servers itself. We just build the
-//! pipeline, propose codecs, and serve our custom web client.
+//! Qcast host entry point. By default it shows a small pre-launch GUI (system
+//! check + viewer URL/QR) and, once confirmed, hides itself and streams in the
+//! background. `--headless` skips the GUI and streams immediately (used for
+//! automated tests and for running under a service manager).
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::Result;
 use clap::Parser;
 use gstreamer as gst;
-use gstreamer::glib;
-use gstreamer::prelude::*;
-use std::str::FromStr;
 
 mod capture;
-
-/// Our custom web client, served by webrtcsink's web server. Absolute path baked
-/// at compile time (bundled for distribution later).
-const WEB_CLIENT_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/web-client");
+mod gui;
+mod host;
+mod preflight;
 
 #[derive(Parser, Debug)]
 #[command(name = "qcast-sender", about = "Qcast host: serves a desktop stream to browsers")]
 struct Args {
-    /// Connection mode (LAN now; Web/TURN deferred).
-    #[arg(long, default_value = "lan")]
-    mode: String,
     /// Address to bind the web + signalling servers on.
     #[arg(long, default_value = "0.0.0.0")]
     host: String,
@@ -32,16 +24,45 @@ struct Args {
     /// Port for the WebRTC signalling server.
     #[arg(long, default_value_t = 8443)]
     signalling_port: u16,
-    /// Capture source: `auto` (real screen via portal, falls back to test) or `test`.
+    /// Capture source: `auto` (real screen) or `test` (test pattern).
     #[arg(long, default_value = "auto")]
     source: String,
+    /// Skip the GUI: start streaming immediately and run until Ctrl+C.
+    #[arg(long)]
+    headless: bool,
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
-    gst::init().context("failed to initialize GStreamer")?;
+    // Default to a clean, app-focused log. The GPU/winit stack (wgpu/naga) is
+    // chatty about probing ICDs it then discards — silence it unless the user
+    // opts in via RUST_LOG, so a first run isn't full of scary-looking warnings.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        tracing_subscriber::EnvFilter::new(
+            "info,wgpu_hal=off,wgpu_core=off,naga=off,egui_wgpu=warn,egui_winit=warn,\
+             gst_plugin_webrtc_signalling=warn",
+        )
+    });
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+    gst::init().expect("failed to initialize GStreamer");
     let args = Args::parse();
 
+    let cfg = host::HostConfig {
+        host: args.host.clone(),
+        web_port: args.web_port,
+        signalling_port: args.signalling_port,
+        test_pattern: args.source == "test",
+    };
+
+    if args.headless {
+        run_headless(cfg)
+    } else {
+        gui::run(cfg)
+    }
+}
+
+/// Headless path: fail fast on a missing streaming core, start, then block until
+/// the operator interrupts (Ctrl+C / SIGTERM).
+fn run_headless(cfg: host::HostConfig) -> Result<()> {
     if gst::ElementFactory::find("webrtcsink").is_none() {
         anyhow::bail!(
             "webrtcsink not found — build & install the gst-plugins-rs webrtc plugin \
@@ -49,104 +70,17 @@ fn main() -> Result<()> {
         );
     }
 
-    // The xdg-desktop-portal capture needs an async (ashpd) runtime; keep it alive
-    // for the whole process so the zbus connection / portal session stays open.
-    let rt = tokio::runtime::Runtime::new().context("tokio runtime")?;
-    let source_desc = if args.source == "test" {
-        tracing::info!("using test pattern (--source test)");
-        "videotestsrc is-live=true pattern=ball".to_string()
-    } else {
-        match rt.block_on(capture::acquire()) {
-            Ok((fd, node_id)) => {
-                tracing::info!(fd, node_id, "capturing desktop via xdg-desktop-portal");
-                format!("pipewiresrc fd={fd} path={node_id}")
-            }
-            Err(e) => {
-                tracing::warn!(error = ?e, "portal capture unavailable; using test pattern");
-                "videotestsrc is-live=true pattern=ball".to_string()
-            }
-        }
-    };
+    let mut running = host::start(cfg)?;
+    tracing::info!("qcast host serving — open  {}  on any device", running.url);
 
-    // webrtcsink runs the signalling + web servers and handles encode/adapt/recover.
-    let desc = format!(
-        "{source_desc} ! videoconvert ! webrtcsink name=ws \
-         run-signalling-server=true signalling-server-host={host} signalling-server-port={sport} \
-         run-web-server=true web-server-host-addr=http://{host}:{wport} web-server-directory={dir} \
-         enable-control-data-channel=true",
-        host = args.host,
-        sport = args.signalling_port,
-        wport = args.web_port,
-        dir = WEB_CLIENT_DIR,
-    );
-    let pipeline = gst::parse::launch(&desc)
-        .context("parse webrtcsink pipeline")?
-        .downcast::<gst::Pipeline>()
-        .map_err(|_| anyhow!("parsed description is not a pipeline"))?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    ctrlc::set_handler(move || {
+        let _ = tx.send(());
+    })
+    .ok();
+    let _ = rx.recv();
 
-    let lan_ip = primary_lan_ip()
-        .map(|ip| ip.to_string())
-        .unwrap_or_else(|| args.host.clone());
-
-    // Propose multiple codecs — each browser negotiates the best it supports
-    // (H.264 for hardware decode on mobile, VP8 universally). Attach stream meta.
-    if let Some(ws) = pipeline.by_name("ws") {
-        if let Ok(caps) = gst::Caps::from_str("video/x-h264;video/x-vp8") {
-            ws.set_property("video-caps", &caps);
-        }
-        ws.set_property("meta", gst::Structure::builder("meta").field("name", "qcast").build());
-
-        // Relay media through coturn on the host's reachable IP, bypassing P2P
-        // isolation and the Docker/veth/IPv6 candidate clutter. The client forces
-        // relay too (iceTransportPolicy). Drop the public STUN noise.
-        let turn_url = format!("turn://qcast:qcastpass@{lan_ip}:3478");
-        ws.set_property("turn-servers", gst::Array::new([turn_url]));
-        ws.set_property("stun-server", None::<String>);
-    }
-
-    pipeline.set_state(gst::State::Playing).context("set pipeline to Playing")?;
-    tracing::info!(
-        "qcast host serving — open  http://{}:{}/  on any device",
-        lan_ip, args.web_port,
-    );
-
-    // Run a glib main loop (keeps webrtcsink + its servers alive); log bus errors.
-    let main_loop = glib::MainLoop::new(None, false);
-    if let Some(bus) = pipeline.bus() {
-        let ml = main_loop.clone();
-        let _watch = bus
-            .add_watch(move |_bus, msg| {
-                use gst::MessageView;
-                match msg.view() {
-                    MessageView::Error(e) => {
-                        tracing::error!(
-                            src = ?e.src().map(|s| s.path_string()),
-                            error = %e.error(), debug = ?e.debug(), "gst ERROR");
-                        ml.quit();
-                    }
-                    MessageView::Warning(w) => {
-                        tracing::warn!(error = %w.error(), "gst warning")
-                    }
-                    MessageView::Eos(_) => {
-                        tracing::warn!("EOS");
-                        ml.quit();
-                    }
-                    _ => {}
-                }
-                glib::ControlFlow::Continue
-            })
-            .context("add bus watch")?;
-        main_loop.run();
-    }
-
-    pipeline.set_state(gst::State::Null).ok();
-    let _ = rt; // keep the portal runtime alive until shutdown
+    tracing::info!("shutting down");
+    running.stop();
     Ok(())
-}
-
-/// Best-effort primary LAN IP so the log prints a URL reachable from other devices.
-fn primary_lan_ip() -> Option<std::net::IpAddr> {
-    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    sock.connect("8.8.8.8:80").ok()?;
-    sock.local_addr().ok().map(|addr| addr.ip())
 }

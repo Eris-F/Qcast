@@ -25,7 +25,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync",
 tokio-tungstenite = "0.29"
 futures-util = "0.3"
 axum = { version = "0.8", features = ["ws"] }
-ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast"] }
+# async-io (not tokio) backend: makes zbus runtime-agnostic, so it works both
+# under our capture `block_on` AND for other zbus users in the graph (eframe's
+# AccessKit AT-SPI). The `tokio` backend forces a running tokio runtime on every
+# zbus consumer and panics AccessKit's accessibility thread on startup.
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "screencast"] }
 gstreamer = "0.25"
 gstreamer-app = "0.25"
 gstreamer-webrtc = "0.25"
