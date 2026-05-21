@@ -204,20 +204,24 @@ fn build_pipeline(
     source: &SourceSpec,
     sig_tx: UnboundedSender<SignalMessage>,
 ) -> Result<(gst::Pipeline, gst::Element)> {
-    // Source branch produces NV12 raw video at a capped framerate; the rest is
-    // shared: encode H.264 -> RTP payload -> webrtcbin.
+    // Source branch produces NV12 raw video, scaled to a mobile-safe 720p
+    // (letterboxed to preserve aspect) at a capped framerate. The shared tail
+    // encodes H.264 as **constrained-baseline** — the profile every mobile
+    // browser decoder handles — then RTP-payloads into webrtcbin.
     let source_desc = match source {
         SourceSpec::Test => "videotestsrc is-live=true pattern=ball ! \
              video/x-raw,width=1280,height=720,framerate=30/1 ! videoconvert"
             .to_string(),
         SourceSpec::Screen { fd, node_id } => format!(
             "pipewiresrc fd={fd} path={node_id} ! videoconvert ! \
-             video/x-raw,format=NV12 ! videorate ! video/x-raw,framerate=30/1"
+             videoscale add-borders=true ! \
+             video/x-raw,format=NV12,width=1280,height=720 ! \
+             videorate ! video/x-raw,framerate=30/1"
         ),
     };
     let desc = format!(
         "{source_desc} ! \
-         {encoder} ! h264parse ! \
+         {encoder} ! video/x-h264,profile=constrained-baseline ! h264parse ! \
          rtph264pay config-interval=-1 pt=96 ! \
          application/x-rtp,media=video,encoding-name=H264,payload=96 ! \
          webrtcbin name=qwebrtc bundle-policy=max-bundle"
