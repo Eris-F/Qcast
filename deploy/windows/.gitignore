@@ -1,0 +1,11 @@
+# Build outputs for the Windows installer. The committable files
+# (gather-payload.ps1, qcast.iss, README.md, .gitignore) stay tracked.
+
+# Staging dir assembled by gather-payload.ps1.
+/staging/
+
+# Inno Setup output dir (Qcast-Setup-*.exe).
+/Output/
+
+# Stray installer / build exes if produced outside Output\.
+*.exe
