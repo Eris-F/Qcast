@@ -70,3 +70,13 @@ pub fn probe() -> Selection {
         decoder: pick_h264_decoder(),
     }
 }
+
+/// Elements `webrtcbin` needs at runtime to set up an encrypted media transport
+/// (ICE via `nice`, DTLS, SRTP, RTP management). Returns the names of any that
+/// are missing on this machine, so the host can fail fast with a clear message.
+pub fn missing_webrtc_support() -> Vec<&'static str> {
+    ["webrtcbin", "nicesink", "dtlsenc", "srtpenc", "rtpbin"]
+        .into_iter()
+        .filter(|name| ElementFactory::find(name).is_none())
+        .collect()
+}

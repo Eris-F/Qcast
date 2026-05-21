@@ -12,5 +12,6 @@ tracing-subscriber.workspace = true
 gstreamer.workspace = true
 clap.workspace = true
 tokio.workspace = true
-tokio-tungstenite.workspace = true
+axum.workspace = true
 futures-util.workspace = true
+gstreamer-webrtc.workspace = true

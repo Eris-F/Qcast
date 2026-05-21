@@ -6,3 +6,7 @@
 # Local secrets / runtime config — never commit (Web-mode auth, TURN creds)
 *.local.toml
 .env
+
+# test artifacts
+/.playwright-mcp/
+/qcast-*.png
