@@ -3,10 +3,11 @@
 # build-appimage.sh — produce a self-contained Qcast-x86_64.AppImage.
 #
 # Bundles: the release qcast-sender binary + the GStreamer runtime libraries +
-# the plugin set it needs (coreelements, videoconvertscale, vpx, rtp/rtpmanager,
-# nice, dtls, srtp, sctp, pipewire, ...) + OUR webrtcsink plugin
-# (libgstrswebrtc.so) + the gst-plugin-scanner. The result runs on a typical
-# Linux desktop with no system GStreamer install.
+# the plugin set it needs (coreelements, videoconvertscale, vpx, webrtc/webrtcbin,
+# rtp/rtpmanager, nice, dtls, srtp, sctp, pipewire, ...) + OUR webrtcsink plugin
+# (libgstrswebrtc.so) + rtpgccbwe (libgstrsrtp.so, congestion control) + the
+# gst-plugin-scanner. The result runs on a typical Linux desktop with no system
+# GStreamer install.
 #
 # Reproducible & re-runnable: downloads tooling into a gitignored cache dir and
 # stages everything under a gitignored build dir. Re-run after code changes.
@@ -35,6 +36,11 @@ ICON_FILE="$SCRIPT_DIR/qcast.png"
 
 BIN_SRC="$REPO_ROOT/target/release/qcast-sender"
 QCAST_PLUGIN_SO="${QCAST_PLUGIN_SO:-$HOME/.local/share/gstreamer-1.0/plugins/libgstrswebrtc.so}"
+# rtpgccbwe (Google Congestion Control) lives in the gst-plugins-rs RTP plugin.
+# webrtcsink uses it for adaptive bitrate / congestion control — reliability is
+# this project's #1 priority. It is a Rust plugin installed alongside ours in
+# ~/.local, NOT in the system plugin dir, so it is staged specially (below).
+QCAST_RSRTP_SO="${QCAST_RSRTP_SO:-$HOME/.local/share/gstreamer-1.0/plugins/libgstrsrtp.so}"
 GST_SYS_PLUGINS="${GST_SYS_PLUGINS:-/usr/lib64/gstreamer-1.0}"
 GST_SYS_HELPERS="${GST_SYS_HELPERS:-/usr/libexec/gstreamer-1.0}"
 
@@ -110,9 +116,14 @@ mkdir -p "$APPDIR/usr/bin" \
 install -m 0755 "$BIN_SRC"      "$APPDIR/usr/bin/qcast-sender"
 install -m 0644 "$DESKTOP_FILE" "$APPDIR/usr/share/applications/qcast.desktop"
 install -m 0644 "$ICON_FILE"    "$APPDIR/usr/share/icons/hicolor/256x256/apps/qcast.png"
-# Our plugin also placed directly in the AppDir's plugin dir so it survives
+# Our plugins also placed directly in the AppDir's plugin dir so they survive
 # even if the gstreamer-plugin pass were skipped.
 install -m 0755 "$QCAST_PLUGIN_SO" "$APPDIR/usr/lib/gstreamer-1.0/libgstrswebrtc.so"
+if [ -f "$QCAST_RSRTP_SO" ]; then
+  install -m 0755 "$QCAST_RSRTP_SO" "$APPDIR/usr/lib/gstreamer-1.0/libgstrsrtp.so"
+else
+  echo "  warning: rtpgccbwe plugin not found, skipping: $QCAST_RSRTP_SO"
+fi
 
 # CURATED plugin set. The gstreamer plugin copies EVERY file from this dir into
 # the AppDir, then linuxdeploy resolves the transitive shared-lib closure of all
@@ -123,9 +134,11 @@ install -m 0755 "$QCAST_PLUGIN_SO" "$APPDIR/usr/lib/gstreamer-1.0/libgstrswebrtc
 #   coreelements        queue/capsfilter/tee/identity/...
 #   videoconvertscale   videoconvert, videoscale
 #   vpx                 vp8enc/vp8dec (royalty-free, preferred codec)
+#   webrtc              webrtcbin — webrtcsink instantiates this internally (CRITICAL)
 #   rtp + rtpmanager    rtp payloaders, rtpbin
 #   nice/dtls/srtp/sctp webrtc transport (ICE / DTLS-SRTP / data channel)
 #   rswebrtc (ours)     webrtcsink
+#   rsrtp (staged sep.) rtpgccbwe — Google congestion control (adaptive bitrate)
 #   app                 appsrc/appsink (webrtcsink internals)
 #   typefindfunctions   caps negotiation
 #   videotestsrc        --source test
@@ -140,6 +153,7 @@ QCAST_PLUGINS=(
   libgstvpx.so
   libgstencoding.so           # encodebin — webrtcsink encode path
   libgstdebugutilsbad.so      # errorignore — used inside webrtcsink discovery
+  libgstwebrtc.so             # webrtcbin — webrtcsink creates this internally (CRITICAL)
   libgstrtp.so
   libgstrtpmanager.so
   libgstnice.so
@@ -167,6 +181,13 @@ for so in "${QCAST_PLUGINS[@]}"; do
   fi
 done
 cp -a "$QCAST_PLUGIN_SO" "$STAGE_PLUGINS/libgstrswebrtc.so"
+# rtpgccbwe (gst-plugins-rs RTP) — staged from ~/.local, not the system dir.
+if [ -f "$QCAST_RSRTP_SO" ]; then
+  cp -a "$QCAST_RSRTP_SO" "$STAGE_PLUGINS/libgstrsrtp.so"
+  log "Staged rtpgccbwe plugin (libgstrsrtp.so) for congestion control"
+else
+  echo "  warning: rtpgccbwe plugin not found, skipping: $QCAST_RSRTP_SO"
+fi
 
 # ---------------------------------------------------------------------------
 # 4. Custom AppRun hook: force the binary onto the BUNDLED plugins.
