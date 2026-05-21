@@ -18,6 +18,11 @@ qrcode = "0.14.1"
 # `termination` so a `kill`/SIGTERM also stops us cleanly (universal fallback to
 # the global hotkey, which can't work under Wayland's security model).
 ctrlc = { version = "3.5.2", features = ["termination"] }
+# Built-in TURN relay (forced ICE relay needs one; embedding it avoids a coturn
+# dependency that's painful on Windows). `util` is webrtc-util, aliased to match
+# the `turn` crate's own import path (Net + the Conn impl on tokio UdpSocket).
+turn = "0.17.1"
+util = { package = "webrtc-util", version = "0.17.1" }
 
 # Desktop capture is platform-specific. The xdg-desktop-portal path (ashpd) is
 # Linux-only; Windows uses the d3d11 screen-capture GStreamer element (no extra

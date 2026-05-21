@@ -11,6 +11,7 @@ mod capture;
 mod gui;
 mod host;
 mod preflight;
+mod turn;
 
 #[derive(Parser, Debug)]
 #[command(name = "qcast-sender", about = "Qcast host: serves a desktop stream to browsers")]

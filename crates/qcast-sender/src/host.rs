@@ -119,6 +119,16 @@ fn run_pipeline(
         }
     };
 
+    // We force ICE relay, so a TURN relay must be up. Start (or reuse) it on this
+    // thread's runtime before building the pipeline; it's torn down at the end.
+    let turn_relay = match crate::turn::ensure_running(&rt, &lan_ip) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = tx.send(Err(e.context("TURN relay")));
+            return;
+        }
+    };
+
     let source_desc = if cfg.test_pattern {
         tracing::info!("using test pattern");
         "videotestsrc is-live=true pattern=ball".to_string()
@@ -174,6 +184,7 @@ fn run_pipeline(
     }
 
     let _ = pipeline.set_state(gst::State::Null);
+    crate::turn::shutdown(&rt, turn_relay);
     drop(rt);
 }
 

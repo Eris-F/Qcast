@@ -86,6 +86,13 @@ pub fn run(host: &str, web_port: u16) -> Report {
     });
 
     checks.push(Check {
+        name: "TURN relay".into(),
+        ok: crate::turn::available(),
+        detail: "built-in".into(),
+        critical: false,
+    });
+
+    checks.push(Check {
         name: "Network address".into(),
         ok: lan_ip != "0.0.0.0",
         detail: if lan_ip != "0.0.0.0" {
