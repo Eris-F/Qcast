@@ -10,3 +10,4 @@
 # test artifacts
 /.playwright-mcp/
 /qcast-*.png
+/qcast-*.jpeg

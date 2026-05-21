@@ -31,6 +31,8 @@ use qcast_core::webrtc::session_description;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{self, UnboundedSender};
 
+mod capture;
+
 const INDEX_HTML: &str = include_str!("../web/index.html");
 const CLIENT_JS: &str = include_str!("../web/client.js");
 
@@ -43,11 +45,24 @@ struct Args {
     /// Address:port to serve on — the port you open in a browser.
     #[arg(long, default_value = "0.0.0.0:8080")]
     listen: String,
+    /// Capture source: `auto` (real screen via portal, falls back to test) or `test`.
+    #[arg(long, default_value = "auto")]
+    source: String,
+}
+
+/// Where the host gets video frames.
+#[derive(Clone)]
+enum SourceSpec {
+    /// Built-in test pattern (no capture, no portal prompt).
+    Test,
+    /// Real desktop via xdg-desktop-portal + PipeWire.
+    Screen { fd: i32, node_id: u32 },
 }
 
 #[derive(Clone)]
 struct AppState {
     encoder: String,
+    source: SourceSpec,
 }
 
 #[tokio::main]
@@ -67,10 +82,26 @@ async fn main() -> Result<()> {
 
     let sel = qcast_core::elements::probe();
     let encoder = sel.encoder.context("no H.264 encoder available")?;
-    tracing::info!(source = ?sel.source, %encoder, mode = %args.mode,
+    tracing::info!(capture = ?sel.source, %encoder, mode = %args.mode,
         "component-agnostic element selection");
 
-    let state = AppState { encoder };
+    let source = if args.source == "test" {
+        tracing::info!("using test pattern (--source test)");
+        SourceSpec::Test
+    } else {
+        match capture::acquire().await {
+            Ok((fd, node_id)) => {
+                tracing::info!(fd, node_id, "capturing desktop via xdg-desktop-portal");
+                SourceSpec::Screen { fd, node_id }
+            }
+            Err(e) => {
+                tracing::warn!(error = ?e, "portal capture unavailable; falling back to test pattern");
+                SourceSpec::Test
+            }
+        }
+    };
+
+    let state = AppState { encoder, source };
     let app = Router::new()
         .route("/", get(index))
         .route("/client.js", get(client_js))
@@ -100,7 +131,7 @@ async fn client_js() -> impl IntoResponse {
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
     ws.on_upgrade(move |socket| async move {
         tracing::info!("browser connected");
-        if let Err(e) = run_session(socket, &state.encoder).await {
+        if let Err(e) = run_session(socket, &state.encoder, &state.source).await {
             tracing::warn!(error = ?e, "session ended with error");
         }
         tracing::info!("session closed");
@@ -109,11 +140,11 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Resp
 
 /// One browser viewer: build a webrtcbin pipeline, offer, and pump SDP/ICE
 /// between the gstreamer callbacks (via an mpsc channel) and this WebSocket.
-async fn run_session(socket: WebSocket, encoder: &str) -> Result<()> {
+async fn run_session(socket: WebSocket, encoder: &str, source: &SourceSpec) -> Result<()> {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (sig_tx, mut sig_rx) = mpsc::unbounded_channel::<SignalMessage>();
 
-    let (pipeline, webrtcbin) = build_pipeline(encoder, sig_tx)?;
+    let (pipeline, webrtcbin) = build_pipeline(encoder, source, sig_tx)?;
     pipeline
         .set_state(gst::State::Playing)
         .context("set pipeline to Playing")?;
@@ -152,11 +183,22 @@ async fn run_session(socket: WebSocket, encoder: &str) -> Result<()> {
 /// offer + ICE callbacks to `sig_tx`.
 fn build_pipeline(
     encoder: &str,
+    source: &SourceSpec,
     sig_tx: UnboundedSender<SignalMessage>,
 ) -> Result<(gst::Pipeline, gst::Element)> {
+    // Source branch produces NV12 raw video at a capped framerate; the rest is
+    // shared: encode H.264 -> RTP payload -> webrtcbin.
+    let source_desc = match source {
+        SourceSpec::Test => "videotestsrc is-live=true pattern=ball ! \
+             video/x-raw,width=1280,height=720,framerate=30/1 ! videoconvert"
+            .to_string(),
+        SourceSpec::Screen { fd, node_id } => format!(
+            "pipewiresrc fd={fd} path={node_id} ! videoconvert ! \
+             video/x-raw,format=NV12 ! videorate ! video/x-raw,framerate=30/1"
+        ),
+    };
     let desc = format!(
-        "videotestsrc is-live=true pattern=ball ! \
-         video/x-raw,width=1280,height=720,framerate=30/1 ! videoconvert ! \
+        "{source_desc} ! \
          {encoder} ! h264parse ! \
          rtph264pay config-interval=-1 pt=96 ! \
          application/x-rtp,media=video,encoding-name=H264,payload=96 ! \
