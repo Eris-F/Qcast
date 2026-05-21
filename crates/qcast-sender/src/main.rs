@@ -80,10 +80,14 @@ fn main() -> Result<()> {
     let quit = Arc::new(AtomicBool::new(false));
     {
         let q = quit.clone();
-        let _ = ctrlc::set_handler(move || {
+        if let Err(e) = ctrlc::set_handler(move || {
             q.store(true, Ordering::SeqCst);
             gui::wake();
-        });
+        }) {
+            // Non-fatal: the global hotkey and a hard kill still stop the process,
+            // but Ctrl+C / SIGTERM won't shut down cleanly without this handler.
+            tracing::warn!(error = %e, "could not install Ctrl+C/SIGTERM handler; use Ctrl+Alt+Q or kill to stop");
+        }
     }
 
     if args.headless {

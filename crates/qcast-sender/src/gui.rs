@@ -8,11 +8,23 @@
 use eframe::egui;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use crate::host::{self, HostConfig, RunningHost};
 use crate::preflight::{self, Report};
+
+/// Lock a `Mutex` tolerantly: if a previous holder panicked and poisoned it, we
+/// recover the inner guard rather than propagating the panic. The data this GUI
+/// guards (the started host + a bool) is plain state with no broken invariant a
+/// panic could leave behind, so recovering is safe and keeps one panic from
+/// cascading into a process abort.
+fn lock_or_recover<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| {
+        tracing::warn!("recovering from a poisoned GUI mutex");
+        poisoned.into_inner()
+    })
+}
 
 /// Lets the Ctrl+C/SIGTERM handler (no `&App`) wake the event loop to close it.
 static EGUI_CTX: OnceLock<egui::Context> = OnceLock::new();
@@ -59,7 +71,7 @@ pub fn run(cfg: HostConfig, quit: Arc<AtomicBool>) -> anyhow::Result<Outcome> {
     )
     .map_err(|e| anyhow::anyhow!("GUI failed: {e}"))?;
 
-    let mut s = shared.lock().unwrap();
+    let mut s = lock_or_recover(&shared);
     if s.background {
         Ok(Outcome::Background(
             s.host.take().expect("background set without a host"),
@@ -154,7 +166,7 @@ impl eframe::App for App {
                 match result {
                     Ok(h) => {
                         {
-                            let mut s = self.shared.lock().unwrap();
+                            let mut s = lock_or_recover(&self.shared);
                             s.host = Some(h);
                             s.background = true;
                         }
