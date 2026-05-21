@@ -112,6 +112,6 @@ async fn build(relay_ip: IpAddr) -> Result<Server> {
 }
 
 /// True if `:port` UDP can't be bound — i.e. something already holds it.
-fn port_in_use(port: u16) -> bool {
+pub(crate) fn port_in_use(port: u16) -> bool {
     StdUdpSocket::bind(("0.0.0.0", port)).is_err()
 }

@@ -24,6 +24,13 @@ mod host;
 mod preflight;
 mod turn;
 
+// In-module integration tests. `qcast-sender` is a binary crate (no lib target),
+// so a top-level `tests/` directory can't reach the crate internals; we instead
+// follow the existing in-module `#[cfg(test)]` pattern and pull these into the
+// crate so they can call `host::start`, `turn::ensure_running`, etc. directly.
+#[cfg(test)]
+mod tests_integration;
+
 #[derive(Parser, Debug)]
 #[command(name = "qcast-sender", about = "Qcast host: serves a desktop stream to browsers")]
 struct Args {
