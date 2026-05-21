@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+mod bundle;
 mod capture;
 mod gui;
 mod host;
@@ -52,6 +53,10 @@ fn main() -> Result<()> {
         )
     });
     tracing_subscriber::fmt().with_env_filter(filter).init();
+    // Relocatable bundles: point GStreamer at plugins shipped next to the exe
+    // BEFORE init (GStreamer reads these env vars only at init time). No-op for a
+    // normal dev build, so `cargo run` keeps using the system/user plugin path.
+    bundle::configure_plugin_path();
     gst::init().expect("failed to initialize GStreamer");
     let args = Args::parse();
 

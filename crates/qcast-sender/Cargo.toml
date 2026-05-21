@@ -23,6 +23,9 @@ ctrlc = { version = "3.5.2", features = ["termination"] }
 # the `turn` crate's own import path (Net + the Conn impl on tokio UdpSocket).
 turn = "0.17.1"
 util = { package = "webrtc-util", version = "0.17.1" }
+# Embed the web client into the binary so one self-contained file works for both
+# the AppImage and the Windows bundle (no source tree on the end-user machine).
+include_dir = "0.7"
 
 # Desktop capture is platform-specific. The xdg-desktop-portal path (ashpd) is
 # Linux-only; Windows uses the d3d11 screen-capture GStreamer element (no extra

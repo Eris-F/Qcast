@@ -6,6 +6,7 @@
 use anyhow::{anyhow, Context, Result};
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
@@ -14,9 +15,79 @@ use std::time::Duration;
 
 use crate::capture;
 
-/// Our custom web client, served by webrtcsink's web server. Absolute path baked
-/// in at compile time.
-pub const WEB_CLIENT_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/web-client");
+/// Our custom web client, embedded into the binary at compile time. Embedding makes
+/// the binary self-contained so one file works for both the AppImage and the
+/// Windows bundle (no source tree on the end-user machine). At startup we extract
+/// it to a fresh per-process temp dir and point webrtcsink's web server at that.
+static WEB_CLIENT: include_dir::Dir =
+    include_dir::include_dir!("$CARGO_MANIFEST_DIR/web-client");
+
+/// Dev-ergonomics override: if this env var is set and points to an existing dir,
+/// the web client is served straight from there (no extraction), so the web client
+/// can be edited live without recompiling.
+const WEB_CLIENT_DIR_ENV: &str = "QCAST_WEB_CLIENT_DIR";
+
+/// Holds the directory we serve the web client from for the pipeline's lifetime.
+/// When we extracted the embedded client to a temp dir, its `Drop` best-effort
+/// removes that dir; for the dev override (an existing user dir) it removes nothing.
+struct WebClientDir {
+    path: PathBuf,
+    /// True only when we created `path` ourselves (a temp dir) and own its cleanup.
+    owned_temp: bool,
+}
+
+impl WebClientDir {
+    /// Resolve the directory to serve the web client from.
+    ///
+    /// - If `QCAST_WEB_CLIENT_DIR` points at an existing dir, serve that directly
+    ///   (dev override; not cleaned up).
+    /// - Otherwise extract the embedded client into a fresh per-process temp dir
+    ///   (`qcast-web-<pid>`) which is removed on `Drop`.
+    fn prepare() -> Result<Self> {
+        if let Some(dir) = std::env::var_os(WEB_CLIENT_DIR_ENV) {
+            let path = PathBuf::from(&dir);
+            if path.is_dir() {
+                tracing::info!(dir = %path.display(), "serving web client from {WEB_CLIENT_DIR_ENV}");
+                return Ok(Self {
+                    path,
+                    owned_temp: false,
+                });
+            }
+            tracing::warn!(
+                dir = %path.display(),
+                "{WEB_CLIENT_DIR_ENV} set but not an existing dir; falling back to embedded client"
+            );
+        }
+
+        let path = std::env::temp_dir().join(format!("qcast-web-{}", std::process::id()));
+        // Start from a clean slate in case a previous run with the same PID crashed.
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path)
+            .with_context(|| format!("create web-client temp dir {}", path.display()))?;
+        WEB_CLIENT
+            .extract(&path)
+            .with_context(|| format!("extract embedded web client to {}", path.display()))?;
+        tracing::debug!(dir = %path.display(), "extracted embedded web client");
+        Ok(Self {
+            path,
+            owned_temp: true,
+        })
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for WebClientDir {
+    fn drop(&mut self) {
+        if self.owned_temp {
+            // Best-effort cleanup; a leftover temp dir is harmless and self-healing
+            // (the next run with this PID clears it before extracting).
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
 
 /// Cap the captured video to a 1080p box before encoding (see [`build_pipeline`]).
 const VIDEO_MAX_WIDTH: u32 = 1920;
@@ -133,6 +204,17 @@ fn run_pipeline(
         }
     };
 
+    // Extract (or locate) the web client. The guard lives until the end of this
+    // function alongside the TURN relay / runtime teardown, so the served files
+    // exist for the whole pipeline lifetime and the temp dir is removed on exit.
+    let web_client = match WebClientDir::prepare() {
+        Ok(w) => w,
+        Err(e) => {
+            let _ = tx.send(Err(e.context("prepare web client")));
+            return;
+        }
+    };
+
     let source_desc = if cfg.test_pattern {
         tracing::info!("using test pattern");
         "videotestsrc is-live=true pattern=ball".to_string()
@@ -146,7 +228,7 @@ fn run_pipeline(
         }
     };
 
-    let pipeline = match build_pipeline(&source_desc, &cfg, &lan_ip) {
+    let pipeline = match build_pipeline(&source_desc, &cfg, &lan_ip, web_client.path()) {
         Ok(p) => p,
         Err(e) => {
             let _ = tx.send(Err(e));
@@ -189,6 +271,9 @@ fn run_pipeline(
 
     let _ = pipeline.set_state(gst::State::Null);
     crate::turn::shutdown(&rt, turn_relay);
+    // Drop the web-client guard explicitly after the pipeline is torn down so the
+    // served temp dir outlives every consumer; its `Drop` removes the temp dir.
+    drop(web_client);
     drop(rt);
 }
 
@@ -201,7 +286,12 @@ fn run_pipeline(
 /// frames. Capping to a 1080p box (`add-borders` letterboxes any aspect) keeps a
 /// 1080p baseline while staying decodable everywhere; webrtcsink still adapts
 /// bitrate/scale down per consumer.
-fn build_pipeline(source_desc: &str, cfg: &HostConfig, lan_ip: &str) -> Result<gst::Pipeline> {
+fn build_pipeline(
+    source_desc: &str,
+    cfg: &HostConfig,
+    lan_ip: &str,
+    web_client_dir: &std::path::Path,
+) -> Result<gst::Pipeline> {
     let desc = format!(
         "{source_desc} ! videoconvert ! videoscale add-borders=true \
          ! video/x-raw,width={vw},height={vh},pixel-aspect-ratio=1/1 ! webrtcsink name=ws \
@@ -213,7 +303,7 @@ fn build_pipeline(source_desc: &str, cfg: &HostConfig, lan_ip: &str) -> Result<g
         host = cfg.host,
         sport = cfg.signalling_port,
         wport = cfg.web_port,
-        dir = WEB_CLIENT_DIR,
+        dir = web_client_dir.display(),
     );
     let pipeline = gst::parse::launch(&desc)
         .context("parse webrtcsink pipeline")?
