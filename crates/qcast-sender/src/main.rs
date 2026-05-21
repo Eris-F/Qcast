@@ -30,6 +30,9 @@ use qcast_core::signaling::SignalMessage;
 use qcast_core::webrtc::session_description;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{self, UnboundedSender};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 mod capture;
 
@@ -162,10 +165,30 @@ async fn run_session(socket: WebSocket, encoder: &str, source: &SourceSpec) -> R
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (sig_tx, mut sig_rx) = mpsc::unbounded_channel::<SignalMessage>();
 
-    let (pipeline, webrtcbin) = build_pipeline(encoder, source, sig_tx)?;
+    let (pipeline, webrtcbin, frames) = build_pipeline(encoder, source, sig_tx)?;
     pipeline
         .set_state(gst::State::Playing)
         .context("set pipeline to Playing")?;
+
+    // Stall detector: log frames/s leaving the encoder; warn loudly on zero.
+    let fps_task = tokio::spawn({
+        let frames = frames.clone();
+        async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            let mut last = 0u64;
+            loop {
+                interval.tick().await;
+                let total = frames.load(Ordering::Relaxed);
+                let fps = total - last;
+                last = total;
+                if fps == 0 {
+                    tracing::warn!(total, "STALL: 0 frames left the encoder in the last second");
+                } else {
+                    tracing::info!(fps, total, "frames/s");
+                }
+            }
+        }
+    });
 
     loop {
         tokio::select! {
@@ -193,6 +216,7 @@ async fn run_session(socket: WebSocket, encoder: &str, source: &SourceSpec) -> R
         }
     }
 
+    fps_task.abort();
     let _ = pipeline.set_state(gst::State::Null);
     Ok(())
 }
@@ -203,7 +227,7 @@ fn build_pipeline(
     encoder: &str,
     source: &SourceSpec,
     sig_tx: UnboundedSender<SignalMessage>,
-) -> Result<(gst::Pipeline, gst::Element)> {
+) -> Result<(gst::Pipeline, gst::Element, Arc<AtomicU64>)> {
     // Source branch produces NV12 raw video, scaled to a mobile-safe 720p
     // (letterboxed to preserve aspect) at a capped framerate. The shared tail
     // encodes H.264 as **constrained-baseline** — the profile every mobile
@@ -213,16 +237,20 @@ fn build_pipeline(
              video/x-raw,width=1280,height=720,framerate=30/1 ! videoconvert"
             .to_string(),
         SourceSpec::Screen { fd, node_id } => format!(
-            "pipewiresrc fd={fd} path={node_id} ! videoconvert ! \
-             videoscale add-borders=true ! \
+            // do-timestamp + keepalive-time: KWin's capture is damage-driven and
+            // stops emitting frames on a static screen; keepalive resends the last
+            // buffer so the stream never goes dead. drop-only avoids retroactive
+            // duplicate bursts after an idle gap.
+            "pipewiresrc fd={fd} path={node_id} do-timestamp=true keepalive-time=1000 ! \
+             videoconvert ! videoscale add-borders=true ! \
              video/x-raw,format=NV12,width=1280,height=720 ! \
-             videorate ! video/x-raw,framerate=30/1"
+             videorate drop-only=true ! video/x-raw,framerate=30/1"
         ),
     };
     let desc = format!(
         "{source_desc} ! \
          {encoder} ! video/x-h264,profile=constrained-baseline ! h264parse ! \
-         rtph264pay config-interval=-1 pt=96 ! \
+         rtph264pay name=pay config-interval=-1 pt=96 ! \
          application/x-rtp,media=video,encoding-name=H264,payload=96 ! \
          webrtcbin name=qwebrtc bundle-policy=max-bundle"
     );
@@ -231,6 +259,47 @@ fn build_pipeline(
         .downcast::<gst::Pipeline>()
         .map_err(|_| anyhow!("parsed description is not a pipeline"))?;
     let webrtcbin = pipeline.by_name("qwebrtc").context("webrtcbin not found")?;
+
+    // --- diagnostics ---------------------------------------------------------
+    // Pipeline errors/warnings/EOS, logged synchronously (no glib main loop).
+    if let Some(bus) = pipeline.bus() {
+        bus.set_sync_handler(|_bus, msg| {
+            use gst::MessageView;
+            match msg.view() {
+                MessageView::Error(e) => tracing::error!(
+                    src = ?e.src().map(|s| s.path_string()),
+                    error = %e.error(), debug = ?e.debug(), "gst ERROR"),
+                MessageView::Warning(w) => tracing::warn!(
+                    src = ?w.src().map(|s| s.path_string()),
+                    error = %w.error(), "gst warning"),
+                MessageView::Eos(_) => tracing::warn!("gst EOS (stream ended)"),
+                _ => {}
+            }
+            gst::BusSyncReply::Pass
+        });
+    }
+
+    // WebRTC connection-state transitions.
+    webrtcbin.connect_notify(Some("connection-state"), |wb, _| {
+        tracing::info!(state = ?wb.property_value("connection-state"), "webrtc connection-state");
+    });
+    webrtcbin.connect_notify(Some("ice-connection-state"), |wb, _| {
+        tracing::info!(state = ?wb.property_value("ice-connection-state"), "webrtc ice-connection-state");
+    });
+
+    // Count buffers leaving the payloader to detect stalls (see frames/s logger).
+    let frames = Arc::new(AtomicU64::new(0));
+    match pipeline.by_name("pay").and_then(|p| p.static_pad("src")) {
+        Some(srcpad) => {
+            let frames = frames.clone();
+            srcpad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                frames.fetch_add(1, Ordering::Relaxed);
+                gst::PadProbeReturn::Ok
+            });
+        }
+        None => tracing::warn!("payloader src pad not found; frame-stall logging disabled"),
+    }
+    // -------------------------------------------------------------------------
 
     // on-negotiation-needed -> create-offer -> set-local-description -> send Offer.
     let tx = sig_tx.clone();
@@ -277,7 +346,7 @@ fn build_pipeline(
         None
     });
 
-    Ok((pipeline, webrtcbin))
+    Ok((pipeline, webrtcbin, frames))
 }
 
 /// Apply a signal received from the browser to the webrtcbin.
