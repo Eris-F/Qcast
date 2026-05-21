@@ -3,7 +3,7 @@
 //! ([`crate::mode::ConnectionMode`]):
 //!
 //! - **LAN**: a direct socket between peers (or mDNS discovery), no server.
-//! - **Web**: a remote WebSocket relayed by `qcast-server`.
+//! - **Web**: a remote WebSocket relayed by `qcast-server`, with a STUN/TURN relay.
 //!
 //! The concrete `Signaling` transport (send/recv a [`SignalMessage`]) lives in
 //! the sender/receiver crates where the LAN and Web backends are implemented.

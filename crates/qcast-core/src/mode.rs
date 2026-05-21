@@ -11,7 +11,7 @@ pub enum ConnectionMode {
     /// Direct on the local network: host ICE candidates only, no STUN/TURN,
     /// no server. Lowest latency; works even when the private server is down.
     Lan,
-    /// Through the private server: remote WebSocket signaling + coturn STUN/TURN.
+    /// Through the private server: remote WebSocket signaling + STUN/TURN relay.
     Web,
 }
 

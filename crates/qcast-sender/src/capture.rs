@@ -41,7 +41,7 @@ pub fn source_description(rt: &tokio::runtime::Runtime) -> Result<String> {
 pub fn source_description(_rt: &tokio::runtime::Runtime) -> Result<String> {
     // Desktop Duplication via Direct3D 11, then download GPU frames to system
     // memory so the negotiated encoder (software VP8, QSV/MF H.264, …) can read
-    // them. Untested from the Linux dev box — verify on Windows.
+    // them. Windows capture path is not yet validated at runtime.
     tracing::info!("capturing desktop via d3d11screencapturesrc");
     Ok("d3d11screencapturesrc show-cursor=true ! d3d11download ! videoconvert".to_string())
 }

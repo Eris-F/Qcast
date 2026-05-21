@@ -15,8 +15,12 @@ use std::time::Duration;
 use crate::capture;
 
 /// Our custom web client, served by webrtcsink's web server. Absolute path baked
-/// in at compile time (bundled for distribution later).
+/// in at compile time.
 pub const WEB_CLIENT_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/web-client");
+
+/// Cap the captured video to a 1080p box before encoding (see [`build_pipeline`]).
+const VIDEO_MAX_WIDTH: u32 = 1920;
+const VIDEO_MAX_HEIGHT: u32 = 1080;
 
 /// How the host should be configured. Cloneable so the GUI can keep a copy for
 /// "retry" after a failed start.
@@ -190,20 +194,22 @@ fn run_pipeline(
 
 /// Build the `… ! videoconvert ! videoscale ! webrtcsink` pipeline.
 ///
-/// IMPORTANT — the `videoscale ! …,width=1920,height=1080` cap is load-bearing,
-/// do NOT remove it to "send native resolution". Browser WebRTC decoders advertise
-/// hard frame-size ceilings (Firefox H.264 = constrained-baseline Level 3.1 → 720p;
-/// VP8 max-fs=12288 MB ≈ 3.1 MP). A 3440×1440 (4.95 MP) capture exceeds all of them,
-/// so the decoder drops every frame → "connects but no video". Capping to a 1080p
-/// box (add-borders letterboxes any aspect) keeps the 1080p baseline while staying
-/// decodable everywhere; webrtcsink still adapts bitrate/scale down per consumer.
+/// The `videoscale ! …,width=1920,height=1080` cap is required for decodability:
+/// browser WebRTC decoders advertise hard frame-size ceilings (Firefox H.264 =
+/// constrained-baseline Level 3.1 ≈ 720p; VP8 max-fs=12288 MB ≈ 3.1 MP). A capture
+/// larger than 1080p exceeds those ceilings, so the decoder cannot decode the
+/// frames. Capping to a 1080p box (`add-borders` letterboxes any aspect) keeps a
+/// 1080p baseline while staying decodable everywhere; webrtcsink still adapts
+/// bitrate/scale down per consumer.
 fn build_pipeline(source_desc: &str, cfg: &HostConfig, lan_ip: &str) -> Result<gst::Pipeline> {
     let desc = format!(
         "{source_desc} ! videoconvert ! videoscale add-borders=true \
-         ! video/x-raw,width=1920,height=1080,pixel-aspect-ratio=1/1 ! webrtcsink name=ws \
+         ! video/x-raw,width={vw},height={vh},pixel-aspect-ratio=1/1 ! webrtcsink name=ws \
          run-signalling-server=true signalling-server-host={host} signalling-server-port={sport} \
          run-web-server=true web-server-host-addr=http://{host}:{wport} web-server-directory={dir} \
          enable-control-data-channel=true",
+        vw = VIDEO_MAX_WIDTH,
+        vh = VIDEO_MAX_HEIGHT,
         host = cfg.host,
         sport = cfg.signalling_port,
         wport = cfg.web_port,
@@ -227,18 +233,23 @@ fn build_pipeline(source_desc: &str, cfg: &HostConfig, lan_ip: &str) -> Result<g
             "meta",
             gst::Structure::builder("meta").field("name", "qcast").build(),
         );
-        // TURN relay (coturn on the LAN host). The client also forces relay, so
-        // ICE collapses to a single relay↔relay candidate pair.
-        let turn_url = format!("turn://qcast:qcastpass@{lan_ip}:3478");
+        // TURN relay (the built-in in-process relay in `turn.rs`). The client also
+        // forces relay, so ICE collapses to a single relay↔relay candidate pair.
+        let turn_url = format!(
+            "turn://{user}:{pass}@{lan_ip}:{port}",
+            user = crate::turn::USER,
+            pass = crate::turn::PASS,
+            port = crate::turn::PORT,
+        );
         ws.set_property("turn-servers", gst::Array::new([turn_url]));
 
-        // Force ICE *relay* transport. This is load-bearing for reliability, not
-        // an optimization: with the default "all" policy, libnice gathers the full
-        // candidate matrix (host + srflx + mDNS + ICE-TCP + relay across every
-        // interface — Docker/VPN/link-local included), and on a real remote device
-        // its nomination tick hits an assertion (conncheck.c: NICE_CHECK_SUCCEEDED)
-        // that ABORTS the whole host process. Relay-only leaves exactly one pair
-        // per component, so there's no nomination race to crash on. Requires coturn.
+        // Force ICE *relay* transport for reliability. Under the default "all"
+        // policy, libnice gathers the full candidate matrix (host + srflx + mDNS +
+        // ICE-TCP + relay across every interface, including Docker/VPN/link-local);
+        // when many candidates are gathered, its nomination tick can hit a libnice
+        // nomination assertion that aborts the process. Relay-only leaves exactly
+        // one candidate pair per component, removing the nomination race. The
+        // built-in TURN relay is always present, so a relay candidate is available.
         ws.set_property_from_str("ice-transport-policy", "relay");
     }
 

@@ -12,7 +12,7 @@ pub struct Config {
     /// Room/stream id both peers agree on.
     pub room: String,
     /// Starting video bitrate in kbps. Congestion control adjusts this at
-    /// runtime (Phase 3) so the connection survives a degrading link.
+    /// runtime so the connection survives a degrading link.
     pub bitrate_kbps: u32,
     /// Web mode only: signaling server WebSocket URL.
     #[serde(default)]
