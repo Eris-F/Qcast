@@ -1,11 +1,20 @@
 //! Qcast host entry point. By default it shows a small pre-launch GUI (system
-//! check + viewer URL/QR) and, once confirmed, hides itself and streams in the
-//! background. `--headless` skips the GUI and streams immediately (used for
-//! automated tests and for running under a service manager).
+//! check + viewer URL/QR); once confirmed, the window CLOSES and Qcast keeps
+//! streaming as a background process (no taskbar entry), stoppable with the
+//! Ctrl+Alt+Q global hotkey or by killing the process. `--headless` skips the
+//! GUI and streams immediately (used for automated tests / running under a
+//! service manager).
 
 use anyhow::Result;
 use clap::Parser;
+use global_hotkey::{
+    hotkey::{Code, HotKey, Modifiers},
+    GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
+};
 use gstreamer as gst;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 mod capture;
 mod gui;
@@ -34,9 +43,8 @@ struct Args {
 }
 
 fn main() -> Result<()> {
-    // Default to a clean, app-focused log. The GPU/winit stack (wgpu/naga) is
-    // chatty about probing ICDs it then discards — silence it unless the user
-    // opts in via RUST_LOG, so a first run isn't full of scary-looking warnings.
+    // App-focused logging; silence the chatty GPU/winit/signalling layers unless
+    // the user opts in via RUST_LOG, so a first run isn't full of scary warnings.
     let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         tracing_subscriber::EnvFilter::new(
             "info,wgpu_hal=off,wgpu_core=off,naga=off,egui_wgpu=warn,egui_winit=warn,\
@@ -54,34 +62,94 @@ fn main() -> Result<()> {
         test_pattern: args.source == "test",
     };
 
+    // One quit signal for the whole process: Ctrl+C / SIGTERM flips it (and wakes
+    // the GUI event loop if it's up). The universal "kill it" path the operator
+    // can always rely on, alongside the global hotkey.
+    let quit = Arc::new(AtomicBool::new(false));
+    {
+        let q = quit.clone();
+        let _ = ctrlc::set_handler(move || {
+            q.store(true, Ordering::SeqCst);
+            gui::wake();
+        });
+    }
+
     if args.headless {
-        run_headless(cfg)
+        run_headless(cfg, quit)
     } else {
-        gui::run(cfg)
+        match gui::run(cfg, quit.clone())? {
+            gui::Outcome::Quit => Ok(()),
+            gui::Outcome::Background(host) => run_background(host, quit),
+        }
     }
 }
 
 /// Headless path: fail fast on a missing streaming core, start, then block until
-/// the operator interrupts (Ctrl+C / SIGTERM).
-fn run_headless(cfg: host::HostConfig) -> Result<()> {
+/// interrupted (Ctrl+C / SIGTERM).
+fn run_headless(cfg: host::HostConfig, quit: Arc<AtomicBool>) -> Result<()> {
     if gst::ElementFactory::find("webrtcsink").is_none() {
         anyhow::bail!(
             "webrtcsink not found — build & install the gst-plugins-rs webrtc plugin \
              (see deploy/setup-linux.sh)"
         );
     }
-
     let mut running = host::start(cfg)?;
     tracing::info!("qcast host serving — open  {}  on any device", running.url);
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    ctrlc::set_handler(move || {
-        let _ = tx.send(());
-    })
-    .ok();
-    let _ = rx.recv();
-
+    while !quit.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(200));
+    }
     tracing::info!("shutting down");
     running.stop();
     Ok(())
+}
+
+/// After the GUI window closes, keep the process alive headless (no window, no
+/// taskbar) until the global hotkey or a kill/Ctrl+C stops it.
+fn run_background(mut host: host::RunningHost, quit: Arc<AtomicBool>) -> Result<()> {
+    tracing::info!("Qcast is now running in the background — open  {}  on any device", host.url);
+    let (_mgr, hotkey_id) = register_quit_hotkey();
+    tracing::info!(
+        "stop with Ctrl+Alt+Q, or kill this process (pid {})",
+        std::process::id()
+    );
+
+    loop {
+        if quit.load(Ordering::SeqCst) {
+            break;
+        }
+        if let Some(id) = hotkey_id {
+            while let Ok(ev) = GlobalHotKeyEvent::receiver().try_recv() {
+                if ev.id == id && ev.state == HotKeyState::Pressed {
+                    quit.store(true, Ordering::SeqCst);
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    tracing::info!("stopping");
+    host.stop();
+    Ok(())
+}
+
+/// Register Ctrl+Alt+Q as the global quit hotkey. Returns `(manager, id)`; the
+/// manager must be kept alive. Both are `None`/`None` where the platform can't
+/// grab a global hotkey (e.g. Wayland) — killing the process is the fallback.
+fn register_quit_hotkey() -> (Option<GlobalHotKeyManager>, Option<u32>) {
+    let mgr = match GlobalHotKeyManager::new() {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(error = %e, "global hotkey unavailable; use kill / Ctrl+C to stop");
+            return (None, None);
+        }
+    };
+    let hotkey = HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyQ);
+    let id = hotkey.id();
+    match mgr.register(hotkey) {
+        Ok(()) => (Some(mgr), Some(id)),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not register Ctrl+Alt+Q; use kill / Ctrl+C to stop");
+            (Some(mgr), None)
+        }
+    }
 }
