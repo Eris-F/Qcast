@@ -1,0 +1,12 @@
+[package]
+name = "qcast-server"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+qcast-core.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+# Phase 2 adds: tokio, axum, tokio-tungstenite for WebSocket signaling.

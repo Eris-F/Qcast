@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+*.swp
+.DS_Store
+
+# Local secrets / runtime config — never commit (Web-mode auth, TURN creds)
+*.local.toml
+.env
