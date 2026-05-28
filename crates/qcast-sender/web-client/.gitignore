@@ -1,3 +1,7 @@
-# Written at runtime by the host (carries the per-session viewer access code).
+node_modules/
+.svelte-kit/
+*.log
+
+# Runtime-written by the host (carries the per-session viewer access code).
 # Only appears here when QCAST_WEB_CLIENT_DIR points at this dir for live dev.
 session.json

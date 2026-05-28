@@ -31,8 +31,14 @@ const HEALTHY_RUN: Duration = Duration::from_secs(30);
 /// the binary self-contained so one file works for both the AppImage and the
 /// Windows bundle (no source tree on the end-user machine). At startup we extract
 /// it to a fresh per-process temp dir and point webrtcsink's web server at that.
+///
+/// Phase 2 moved the source to a Vite + Svelte 5 project — `cargo build` embeds
+/// the **built** output (`web-client/dist`), not the source tree, so the binary
+/// stays self-contained and the `index.html` includes hashed JS/CSS assets that
+/// load straight from `/assets/…`. The `dist/` directory is committed to git so
+/// `cargo build` works without a prior `npm run build`.
 static WEB_CLIENT: include_dir::Dir =
-    include_dir::include_dir!("$CARGO_MANIFEST_DIR/web-client");
+    include_dir::include_dir!("$CARGO_MANIFEST_DIR/web-client/dist");
 
 /// Dev-ergonomics override: if this env var is set and points to an existing dir,
 /// the web client is served straight from there (no extraction), so the web client

@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "identifier": "app.qcast.desktop",
   "build": {
-    "frontendDist": "../crates/qcast-sender/web-client"
+    "frontendDist": "../crates/qcast-sender/web-client/dist",
+    "beforeBuildCommand": "cd ../crates/qcast-sender/web-client && npm install && npm run build"
   },
   "app": {
     "windows": [

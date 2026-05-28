@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Qcast</title>
+  <style>
+    :root {
+      --bg: #0b0d12;
+      --panel: #151922;
+      --panel-2: #1d2330;
+      --border: #2a3140;
+      --text: #e6e9ef;
+      --muted: #8b93a3;
+      --accent: #4ea3ff;
+      --accent-2: #2f6fd6;
+      --danger: #ff6b6b;
+      --ok: #4cd07d;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; height: 100%; background: var(--bg); color: var(--text);
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      overflow: hidden; -webkit-font-smoothing: antialiased;
+    }
+
+    /* ---------- Viewer ---------- */
+    #viewer { position: fixed; inset: 0; display: block; }
+    #stage { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+    video { max-width: 100%; max-height: 100%; background: #000; }
+
+    .topbar {
+      position: fixed; top: 0; left: 0; right: 0; height: 46px; z-index: 5;
+      display: flex; align-items: center; gap: 12px; padding: 0 14px;
+      background: linear-gradient(180deg, rgba(11,13,18,0.85), rgba(11,13,18,0));
+      pointer-events: none;
+    }
+    .topbar .left, .topbar .right { display: flex; align-items: center; gap: 10px; }
+    .topbar .right { margin-left: auto; pointer-events: auto; }
+    .brand-sm { font-weight: 700; font-size: 15px; letter-spacing: 0.5px; }
+    #status {
+      display: inline-flex; align-items: center; gap: 7px;
+      padding: 5px 11px; border-radius: 999px; font-size: 13px;
+      background: rgba(0,0,0,0.45); border: 1px solid var(--border);
+    }
+    #status .led {
+      width: 9px; height: 9px; border-radius: 50%; background: var(--muted);
+      transition: background 0.2s, box-shadow 0.2s;
+    }
+    #status.connecting .led { background: #e8c34a; box-shadow: 0 0 8px #e8c34a; }
+    #status.live .led { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+    #status.waiting .led { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+    #status.disconnected .led { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
+    .iconbtn {
+      pointer-events: auto; cursor: pointer; padding: 6px 10px; font-size: 13px;
+      color: var(--text); background: rgba(0,0,0,0.45);
+      border: 1px solid var(--border); border-radius: 8px; transition: background 0.15s;
+    }
+    .iconbtn:hover { background: rgba(255,255,255,0.10); }
+
+    #tap-to-play {
+      position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+      font-size: 18px; cursor: pointer; background: rgba(0,0,0,0.45); z-index: 4;
+    }
+    #tap-to-play span {
+      padding: 14px 22px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel);
+    }
+  </style>
+</head>
+<body>
+  <!-- Viewer. Pairing is enforced at the signalling layer (producer-peer-id);
+       the pre-pivot client-side password gate has been removed. -->
+  <div id="viewer">
+    <div class="topbar">
+      <div class="left">
+        <span class="brand-sm">Qcast</span>
+        <span id="status" class="connecting"><span class="led"></span><span id="status-text">Connecting…</span></span>
+      </div>
+      <div class="right">
+        <button id="fullscreen-btn" class="iconbtn" type="button">Fullscreen</button>
+      </div>
+    </div>
+    <!-- tabindex makes the video focusable so it receives keydown events for
+         remote-control keyboard forwarding (gstwebrtc-api attachVideoElement). -->
+    <div id="stage"><video id="video" tabindex="0" autoplay playsinline muted></video></div>
+    <div id="tap-to-play"><span>▶ Tap to view</span></div>
+  </div>
+
+  <!-- Prebuilt gst-plugins-rs WebRTC consumer library (handles the webrtcsink signalling protocol) -->
+  <script src="gstwebrtc-api-3.0.0.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
