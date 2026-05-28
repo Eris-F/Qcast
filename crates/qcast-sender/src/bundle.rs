@@ -8,9 +8,7 @@
 //! no-op: no env var is touched, so `cargo run` keeps using the system/user plugin
 //! path exactly as before.
 
-#[cfg(test)]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// On non-Windows, the scanner has no extension; on Windows it's `.exe`.
 #[cfg(windows)]
@@ -31,18 +29,7 @@ pub fn configure_plugin_path() {
         return;
     };
 
-    // Candidate bundled plugin dirs, in priority order:
-    //   <exedir>/../lib/gstreamer-1.0  — AppImage `usr/bin` → `usr/lib` layout
-    //   <exedir>/lib/gstreamer-1.0     — Windows app-dir layout
-    //   <exedir>/gstreamer-1.0         — flat layout
-    // First existing wins for ordering, but we prepend every one that exists.
-    let candidates = [
-        exe_dir.join("..").join("lib").join("gstreamer-1.0"),
-        exe_dir.join("lib").join("gstreamer-1.0"),
-        exe_dir.join("gstreamer-1.0"),
-    ];
-
-    let found: Vec<PathBuf> = candidates.into_iter().filter(|p| p.is_dir()).collect();
+    let found = bundled_plugin_dirs(exe_dir);
     if found.is_empty() {
         // Normal dev build: no bundled dir → strict no-op.
         tracing::debug!("bundle: no bundled GStreamer plugin dir next to exe; using system paths");
@@ -66,7 +53,7 @@ pub fn configure_plugin_path() {
     tracing::debug!(path = %new_path, "bundle: prepended bundled plugin dir(s) to GST_PLUGIN_PATH");
 
     // Bundled plugin scanner, if shipped. AppImage: <exedir>/../libexec/...;
-    // Windows/flat: <exedir>/libexec/...
+    // Windows flat (Inno): <exedir>/libexec/...; Tauri NSIS: <exedir>/resources/libexec/...
     let scanner_candidates = [
         exe_dir
             .join("..")
@@ -77,34 +64,54 @@ pub fn configure_plugin_path() {
             .join("libexec")
             .join("gstreamer-1.0")
             .join(SCANNER_NAME),
+        exe_dir
+            .join("resources")
+            .join("libexec")
+            .join("gstreamer-1.0")
+            .join(SCANNER_NAME),
     ];
     if let Some(scanner) = scanner_candidates.iter().find(|p| p.is_file()) {
         std::env::set_var("GST_PLUGIN_SCANNER", scanner);
         tracing::debug!(scanner = %scanner.display(), "bundle: set GST_PLUGIN_SCANNER");
     }
 
-    // Only an explicitly-packaged run (QCAST_BUNDLE=1) AND a real bundled dir should
-    // disable the system plugin path — this stops the AppImage from picking up
-    // mismatched host plugins. A plain copied dev binary leaves system paths alone.
-    if std::env::var("QCAST_BUNDLE").as_deref() == Ok("1") {
+    // Clear the system plugin path so a host's mismatched GStreamer install can't
+    // shadow our bundled plugins (a real failure mode flagged in packaging research).
+    // We reach here only when a sibling bundled dir actually exists.
+    //   - Windows: a sibling bundled dir is itself proof this is a packaged install
+    //     (a dev `cargo run` never has one), and a Start-Menu/installer shortcut
+    //     cannot inject env vars — so we do NOT require QCAST_BUNDLE=1 there.
+    //   - Linux (AppImage): keep the explicit QCAST_BUNDLE=1 opt-in, so a developer
+    //     running a copied-into-a-bundle-layout binary still gets the system paths.
+    let clear_system_path = cfg!(windows) || std::env::var("QCAST_BUNDLE").as_deref() == Ok("1");
+    if clear_system_path {
         std::env::set_var("GST_PLUGIN_SYSTEM_PATH_1_0", "");
-        tracing::debug!("bundle: QCAST_BUNDLE=1 — cleared GST_PLUGIN_SYSTEM_PATH_1_0");
+        tracing::debug!("bundle: cleared GST_PLUGIN_SYSTEM_PATH_1_0 (packaged run)");
     }
 }
 
-/// Test-only helper exposing the candidate-dir logic so we can assert ordering /
-/// no-op behaviour without mutating process env. Returns the bundled plugin dirs
-/// that exist under `exe_dir`, in priority order.
-#[cfg(test)]
-pub fn bundled_plugin_dirs(exe_dir: &Path) -> Vec<PathBuf> {
+/// Candidate bundled plugin dirs relative to the exe dir, in priority order. We
+/// prepend every one that exists to `GST_PLUGIN_PATH`.
+///   `<exedir>/../lib/gstreamer-1.0`        — AppImage `usr/bin` → `usr/lib` layout
+///   `<exedir>/lib/gstreamer-1.0`           — Windows flat app-dir (Inno installer)
+///   `<exedir>/resources/lib/gstreamer-1.0` — Tauri NSIS `bundle.resources` layout
+///   `<exedir>/gstreamer-1.0`               — flat layout
+fn plugin_dir_candidates(exe_dir: &Path) -> [PathBuf; 4] {
     [
         exe_dir.join("..").join("lib").join("gstreamer-1.0"),
         exe_dir.join("lib").join("gstreamer-1.0"),
+        exe_dir.join("resources").join("lib").join("gstreamer-1.0"),
         exe_dir.join("gstreamer-1.0"),
     ]
-    .into_iter()
-    .filter(|p| p.is_dir())
-    .collect()
+}
+
+/// The bundled plugin dirs that actually exist under `exe_dir`, in priority order.
+/// Returns empty for a normal dev build (no sibling bundled dir) → strict no-op.
+fn bundled_plugin_dirs(exe_dir: &Path) -> Vec<PathBuf> {
+    plugin_dir_candidates(exe_dir)
+        .into_iter()
+        .filter(|p| p.is_dir())
+        .collect()
 }
 
 #[cfg(test)]
@@ -117,6 +124,18 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         assert!(bundled_plugin_dirs(&tmp).is_empty());
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn detects_tauri_resources_layout() {
+        // Tauri NSIS ships bundle.resources under <exedir>/resources/.
+        let base = std::env::temp_dir().join(format!("qcast-bundle-test-tauri-{}", std::process::id()));
+        let res = base.join("resources").join("lib").join("gstreamer-1.0");
+        std::fs::create_dir_all(&res).unwrap();
+        let dirs = bundled_plugin_dirs(&base);
+        assert_eq!(dirs.len(), 1, "expected the resources dir: {dirs:?}");
+        assert_eq!(dirs[0].canonicalize().unwrap(), res.canonicalize().unwrap());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
