@@ -9,12 +9,18 @@
 //! dev box without taking over the developer's own session.
 
 mod event;
+mod inject_file;
 #[cfg(not(windows))]
 mod inject_other;
 #[cfg(windows)]
 mod inject_windows;
 
-pub use event::{InputEvent, MouseButton};
+pub use event::InputEvent;
+// Part of the public input API (named by `InputEvent::MouseButton`), but only
+// referenced by the cfg(windows) SendInput backend + tests — hence the allow on
+// non-Windows builds.
+#[allow(unused_imports)]
+pub use event::MouseButton;
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -28,8 +34,23 @@ pub trait InputInjector: Send {
 /// Shared, thread-safe injector — probes fire on GStreamer streaming threads.
 pub type SharedInjector = Arc<Mutex<Box<dyn InputInjector>>>;
 
-/// Build the platform injector: Windows `SendInput`, else a logging no-op.
+/// Build the input injector. If `QCAST_INPUT_LOG=<path>` is set, decoded events are
+/// appended to that file (for the automatable browser→sender E2E — see
+/// `deploy/TEST_PLAN.md`) instead of being replayed. Otherwise: Windows `SendInput`,
+/// else a logging no-op.
 pub fn platform_injector() -> Box<dyn InputInjector> {
+    if let Some(path) = std::env::var_os("QCAST_INPUT_LOG") {
+        match inject_file::FileLoggingInjector::new(&path) {
+            Ok(inj) => {
+                tracing::info!(path = ?path, "input: logging decoded events to QCAST_INPUT_LOG file");
+                return Box::new(inj);
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                "input: QCAST_INPUT_LOG set but could not open the file; using the platform injector"
+            ),
+        }
+    }
     #[cfg(windows)]
     {
         Box::new(inject_windows::SendInputInjector::new())
@@ -172,5 +193,24 @@ mod tests {
                 pressed: true,
             }]
         );
+    }
+
+    /// The QCAST_INPUT_LOG file injector appends decoded events — the sink the
+    /// future browser→sender E2E asserts against (deploy/TEST_PLAN.md, Layer 4).
+    #[test]
+    fn file_logging_injector_appends_events() {
+        use std::io::Read;
+        let path = std::env::temp_dir().join(format!("qcast-input-log-{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut inj = inject_file::FileLoggingInjector::new(&path).unwrap();
+            inj.inject(&InputEvent::MouseMove { x: 0.5, y: 0.25 });
+            inj.inject(&InputEvent::Key { key: "a".into(), pressed: true });
+        }
+        let mut s = String::new();
+        std::fs::File::open(&path).unwrap().read_to_string(&mut s).unwrap();
+        assert!(s.contains("MouseMove { x: 0.5, y: 0.25 }"), "log was: {s:?}");
+        assert!(s.contains(r#"Key { key: "a", pressed: true }"#), "log was: {s:?}");
+        let _ = std::fs::remove_file(&path);
     }
 }
