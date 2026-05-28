@@ -25,6 +25,7 @@ use crate::AppState;
 /// The currently-running share session as the UI sees it. `started_at` is an
 /// RFC3339-ish UTC timestamp so the UI can format it however it wants.
 #[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ShareSession {
     pub code: String,
     pub started_at: String,
@@ -32,6 +33,7 @@ pub struct ShareSession {
 
 /// Options the user picks on the "Share" screen before starting a session.
 #[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ShareOptions {
     /// Global hotkey string (Tauri global-shortcut accelerator format,
     /// e.g. `"Ctrl+Alt+Q"`) that hard-stops the share.
@@ -44,6 +46,7 @@ pub struct ShareOptions {
 
 /// One LAN-discovered peer entry sent to the "Client" screen.
 #[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LanSession {
     pub peer_id: String,
     pub display_name: String,
@@ -69,6 +72,7 @@ impl From<mdns::LanSession> for LanSession {
 /// Persisted user preferences. Whole-document overwrites are fine; the file is
 /// tiny and we never partial-write it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub default_kill_hotkey: String,
     pub auto_check_updates: bool,
@@ -86,6 +90,7 @@ impl Default for Settings {
 /// Partial settings update from the UI. Only fields the user actually changed
 /// are sent; the rest stay at their current values.
 #[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SettingsPatch {
     pub default_kill_hotkey: Option<String>,
     pub auto_check_updates: Option<bool>,
@@ -220,8 +225,9 @@ pub async fn connect_to_code(code: String) -> Result<(), String> {
     Ok(())
 }
 
-/// PLACEHOLDER — see `connect_to_code`.
-#[tauri::command]
+/// PLACEHOLDER — see `connect_to_code`. `rename_all = "camelCase"` so the JS
+/// side can invoke with `{ peerId }` matching the rest of the IPC surface.
+#[tauri::command(rename_all = "camelCase")]
 pub async fn connect_to_lan(peer_id: String) -> Result<(), String> {
     tracing::info!(?peer_id, "connect_to_lan (stub)");
     Ok(())
