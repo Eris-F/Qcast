@@ -57,8 +57,11 @@ Windows parts as ready-to-run + a tight validation checklist.
 
 ## Do this when you're back (in order)
 
-1. **Boot Windows** (or build a clean Windows VM — say the word and I'll script the
-   `virt-install` + a remote-exec bridge so I can drive it from the CLI next time).
+1. **Boot Windows** and run `deploy/tauri/build-windows.ps1` (fastest one-off) — **or**
+   stand up the VM so I can finish it autonomously: `deploy/vm/` now has
+   `create-windows-vm.sh` + `windows-setup.ps1`. You provide a Windows ISO + run
+   `sudo dnf install @virtualization` (the only steps I can't), then hand me the
+   guest's SSH IP and I'll build + validate the installer over SSH.
 2. Provision the build box per `deploy/windows/README.md` §Prereqs + `cargo install tauri-cli`.
 3. `gst-inspect-1.0` smoke-check `d3d11screencapturesrc`, `webrtcsink`, `rtpgccbwe`,
    `vp8enc`, an H.264 element (TEST_PLAN.md Layer 3).
