@@ -8,7 +8,11 @@ Everything below is **committed on `master`, builds green, all tests pass** on F
 `~/qcast-vm/Qcast_0.1.0_x64-setup.exe` — **273 MB NSIS `-setup.exe`**, produced by
 `cargo tauri build` inside a rootless-podman/KVM Windows 11 VM stood up tonight.
 File magic confirms a real Nullsoft installer.
-SHA256: `d3ba235ce115d2b4f2cdc38125bceee49b29ca923e24d3cae0924fb101ea09c4`.
+SHA256: `f382b2af82adad6f51d395ec430034fb71f98ef44c92bb2ef03e06ce00bceb6e`.
+**Bundle contents (verified via `7z l`):** `qcast-app.exe` (9.4 MB Tauri shell) +
+`lib/gstreamer-1.0/gstrswebrtc.dll` (18.8 MB, gst-plugins-rs webrtcsink) + the
+`libexec/gstreamer-1.0/gst-plugin-scanner.exe` + 100+ GStreamer runtime/plugin DLLs +
+the WebView2 offline runtime.
 
 How it got built, end-to-end and autonomous (no sudo, no Windows reboot):
 
@@ -28,12 +32,17 @@ How it got built, end-to-end and autonomous (no sudo, no Windows reboot):
    GStreamer DLLs + scanner into `src-tauri/gst-runtime/`, ran `cargo tauri build` →
    the bundle above.
 
-**Honest caveat — the one missing piece for full runtime function:** the bundle has
-the official GStreamer payload but **not** `gstrswebrtc.dll` (the `gst-plugins-rs`
-webrtc plugin built via `cargo cbuild`). The installer installs cleanly and the app
-launches; `webrtcsink` won't instantiate until that one DLL is added — a 5-minute
-follow-up (clone gst-plugins-rs, `cargo cbuild -p gst-plugin-webrtc`, drop the DLL
-into `gst-runtime/lib/gstreamer-1.0/`, rebuild). Tracked.
+6. **Caveat-fix:** cloned gst-plugins-rs @ 0.15 in the guest, ran `cargo cbuild -p
+   gst-plugin-webrtc`, dropped the resulting `gstrswebrtc.dll` (18.8 MB) into
+   `gst-runtime/lib/gstreamer-1.0/`, re-ran `cargo tauri build` → the bundle above
+   (v2). The installer is now functionally complete; `webrtcsink` is present.
+
+**Remaining for true sign-off:** running `Qcast_0.1.0_x64-setup.exe` on a **clean**
+Windows machine (one that does NOT have the system GStreamer install that the build VM
+has) and confirming (a) it installs without UAC + (b) Qcast launches + (c) `share` +
+`connect` work end-to-end. The build VM is not a valid validation target (its system
+GStreamer would mask the bundled one). Procedure: `deploy/WINDOWS_INSTALLER.md` §9 +
+`deploy/TEST_PLAN.md` Layer 5.
 
 ## The "Windows hardware" blocker that was here
 
