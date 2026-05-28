@@ -1,5 +1,16 @@
 # Qcast Windows bundled installer
 
+> **Pivot note (2026-05-28):** this Inno Setup recipe is now **Prototype B** (the
+> proven flat-layout fallback) in the Windows↔Windows Tauri pivot. The **primary**
+> installer is the **Tauri NSIS** bundler — see `deploy/WINDOWS_INSTALLER.md`
+> (decision doc) and `deploy/tauri/` (scaffold). Two things change for the pivot:
+> the staged binary becomes the **Tauri app exe** (not the egui `qcast-sender.exe`),
+> and a **WebView2** runtime must be added (the Evergreen Bootstrapper in `[Files]` +
+> a `[Run]` step — Tauri handles this automatically; Inno does not). The GStreamer
+> bundling + relocatable layout below are unchanged and reused. `gather-payload.ps1`
+> already carries the H.264 fallback plugins; `bundle.rs` already handles both the
+> flat (Inno) and `resources\` (Tauri) layouts.
+
 Builds `Qcast-Setup-<version>.exe`: a **per-user** installer that ships the prebuilt
 `qcast-sender.exe` + the GStreamer MSVC runtime DLLs + the curated plugin set
 (including our `gstrswebrtc.dll`) + the `gst-plugin-scanner`. The end user installs
