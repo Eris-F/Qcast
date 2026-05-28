@@ -36,8 +36,10 @@ use tauri_plugin_updater::UpdaterExt;
 
 /// Renderer-facing summary of an available update. Mirrors the fields the
 /// Phase 4 UI's "updates row" needs to render the prompt without a second
-/// round-trip.
+/// round-trip. camelCase so the renderer can use `update.publishedAt`
+/// without an extra mapping step.
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateInfo {
     pub version: String,
     pub notes: String,
