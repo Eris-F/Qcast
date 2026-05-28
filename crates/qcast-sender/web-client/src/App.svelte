@@ -1,16 +1,24 @@
 <script lang="ts">
-  // Phase 2 landing page — proves the toolchain (Vite + Svelte 5 + Tailwind v4 +
-  // shadcn-svelte) is wired up. Real screens land in Phase 3 (see UI_REWRITE.md).
-  import { Button } from '$lib/components/ui/button';
+  // Top-level router host. We use svelte-spa-router (hash-based) because
+  // file:// + WebView2 makes browser-history routing fragile, and a hash route
+  // is also bullet-proof under `npm run dev` and `npm run preview`.
+  import Router from 'svelte-spa-router';
+  import Launcher from './routes/Launcher.svelte';
+  import HostPreflight from './routes/HostPreflight.svelte';
+  import HostActive from './routes/HostActive.svelte';
+  import ClientConnect from './routes/ClientConnect.svelte';
+  import Viewer from './routes/Viewer.svelte';
+
+  // Order matters: more-specific routes first.
+  const routes = {
+    '/': Launcher,
+    '/host': HostPreflight,
+    '/host/active': HostActive,
+    '/client': ClientConnect,
+    '/client/viewer': Viewer,
+    // Fallback for any unknown hash — bounce back to the launcher.
+    '*': Launcher,
+  };
 </script>
 
-<main class="min-h-screen flex flex-col items-center justify-center gap-6 p-8">
-  <div class="flex items-center gap-3">
-    <span class="size-3 rounded-full bg-[var(--primary)]"></span>
-    <h1 class="text-2xl font-semibold tracking-tight">Qcast</h1>
-  </div>
-  <p class="text-sm" style="color: var(--muted-foreground)">
-    UI scaffold ready. Phase 3 builds the screens.
-  </p>
-  <Button>It builds.</Button>
-</main>
+<Router {routes} />
