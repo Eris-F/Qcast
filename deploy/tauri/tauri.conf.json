@@ -31,12 +31,14 @@
     "targets": ["nsis"],
     "icon": ["icons/icon.ico", "icons/128x128.png"],
     "resources": {
+      "gst-runtime/bin": "bin",
       "gst-runtime/lib/gstreamer-1.0": "lib/gstreamer-1.0",
       "gst-runtime/libexec/gstreamer-1.0/gst-plugin-scanner.exe": "libexec/gstreamer-1.0/gst-plugin-scanner.exe"
     },
     "windows": {
       "nsis": {
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "installerHooks": "./installer-hooks.nsh"
       },
       "webviewInstallMode": {
         "type": "offlineInstaller",

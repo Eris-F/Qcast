@@ -157,15 +157,21 @@ Notes / boundaries:
   concealment — keep the "Stop sharing" affordance and an identifiable presence.
 - `Cargo.toml` features: `tauri = { version = "2", features = ["tray-icon", "image-png"] }`.
 
-## 5. Build the installer
+## 5. Build the installer — one command
+
+After creating the app (§1) and copying this dir's `tauri.conf.json` +
+`installer-hooks.nsh` into it:
 
 ```powershell
-# 1. stage the GStreamer payload into deploy/tauri/gst-runtime/ (reuse gather-payload’s logic)
-deploy\windows\gather-payload.ps1 -StagingDir deploy\tauri\gst-runtime
-# 2. build the Tauri NSIS installer
-cargo tauri build
-#    → src-tauri\target\release\bundle\nsis\Qcast_<ver>_x64-setup.exe
+deploy\tauri\build-windows.ps1
+#  1. stages GStreamer into <TauriDir>\gst-runtime\{bin,lib,libexec}
+#  2. cargo tauri build
+#  → src-tauri\target\release\bundle\nsis\Qcast_<ver>_x64-setup.exe
 ```
+
+`installer-hooks.nsh` (wired via `nsis.installerHooks`) relocates the flat
+`gst-runtime\bin` DLLs next to the exe at install time — the fix for risk #1
+(plugins + scanner stay under `resources\`, where `bundle.rs` finds them).
 
 Validate with `deploy/WINDOWS_INSTALLER.md` §9 and `deploy/TEST_PLAN.md` (Layers 3–5).
 
