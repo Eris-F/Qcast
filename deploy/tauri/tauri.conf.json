@@ -1,0 +1,47 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Qcast",
+  "version": "0.1.0",
+  "identifier": "app.qcast.desktop",
+  "build": {
+    "frontendDist": "../../crates/qcast-sender/web-client"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Qcast",
+        "width": 1280,
+        "height": 800,
+        "resizable": true,
+        "skipTaskbar": false
+      }
+    ],
+    "trayIcon": {
+      "id": "qcast-tray",
+      "iconPath": "icons/icon.png",
+      "tooltip": "Qcast",
+      "menuOnLeftClick": false
+    },
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico", "icons/128x128.png"],
+    "resources": {
+      "gst-runtime/lib/gstreamer-1.0": "lib/gstreamer-1.0",
+      "gst-runtime/libexec/gstreamer-1.0/gst-plugin-scanner.exe": "libexec/gstreamer-1.0/gst-plugin-scanner.exe"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      },
+      "webviewInstallMode": {
+        "type": "offlineInstaller",
+        "silent": true
+      }
+    }
+  }
+}
