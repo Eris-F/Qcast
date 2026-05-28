@@ -1,13 +1,12 @@
-//! The viewer access code (a.k.a. the "password" the operator shares).
+//! The pairing access code (the human-shareable session id).
 //!
-//! The code is generated ONCE per process in `main()`, stored on `HostConfig`,
-//! and is the single source of truth for both the GUI display and the
-//! `session.json` we serve to the browser. The browser compares what the viewer
-//! types against the served value.
-//!
-//! NOTE: this is a client-side UX gate, not enforced authentication — anyone on
-//! the LAN can read `session.json` or the served JS to learn the code.
-//! Signalling-layer enforcement is future work.
+//! The code is generated ONCE per session in `main()`, stored on `HostConfig`,
+//! and is the single source of truth for: the GUI display, the headless log
+//! line, the mDNS `peer-id` TXT record (see `mdns.rs`), and the webrtcsink
+//! `producer-peer-id` set on the signaller in `host::build_pipeline`. Pairing
+//! happens at the signalling layer — a consumer must subscribe to the matching
+//! producer-peer-id — rather than the pre-pivot client-side `session.json`
+//! gate that is now gone.
 
 use rand::seq::SliceRandom;
 

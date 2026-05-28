@@ -12,6 +12,7 @@ pub mod capture;
 pub mod gui;
 pub mod host;
 pub mod input;
+pub mod mdns;
 pub mod preflight;
 pub mod turn;
 

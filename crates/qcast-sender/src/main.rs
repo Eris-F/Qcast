@@ -88,9 +88,9 @@ fn main() -> Result<()> {
     host::validate_resolution(args.max_width, args.max_height)?;
     let codec_pref = parse_codec_pref(&args.codec)?;
 
-    // Generate the viewer access code ONCE here: this is the single source of
-    // truth shared by the GUI display, the headless log line, and the served
-    // session.json the browser reads.
+    // Generate the pairing access code ONCE here: this is the single source of
+    // truth shared by the GUI display, the headless log line, the mDNS peer-id
+    // TXT record, and webrtcsink's signaller producer-peer-id.
     let access_code = access_code::generate();
 
     let cfg = host::HostConfig {

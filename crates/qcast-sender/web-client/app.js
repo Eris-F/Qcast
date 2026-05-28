@@ -3,22 +3,17 @@
 // + loss recovery for us), and adds our own UI + a hook for "extra data" from
 // the host via the control data channel and the producer's meta.
 //
-// SECURITY NOTE: the password entry below is a CLIENT-SIDE UX GATE, not enforced
-// authentication. The expected code is fetched from session.json and compared in
-// the browser, so a determined LAN user can read session.json (or this JS) and
-// learn the code, or skip the gate entirely by talking to the signalling server
-// directly. Real enforcement belongs at the signalling layer (reject consumer
-// sessions without a valid token) and is future work.
+// SECURITY NOTE: pairing is now enforced at the signalling layer via the
+// access code (set as webrtcsink's `producer-peer-id` on the sender). The
+// pre-pivot client-side `session.json` password gate has been removed; the
+// viewer just subscribes to the first available producer once the host is up.
+// Subscribing to a specific peer-id by code is Phase 3 frontend work.
 
 const video = document.getElementById("video");
 const tapToPlay = document.getElementById("tap-to-play");
 const fullscreenBtn = document.getElementById("fullscreen-btn");
 
-const gateEl = document.getElementById("gate");
 const viewerEl = document.getElementById("viewer");
-const codeInput = document.getElementById("code-input");
-const connectBtn = document.getElementById("connect");
-const gateError = document.getElementById("gate-error");
 
 const statusEl = document.getElementById("status");
 const statusText = document.getElementById("status-text");
@@ -37,54 +32,6 @@ function setStatus(state) {
   statusEl.className = cls;
   statusText.textContent = label;
 }
-
-// ---------------------------------------------------------------------------
-// Password gate. Normalize so the viewer can omit/add slashes or spaces and
-// type any case: keep only A–Z/0–9, uppercase. Compare normalized forms.
-// ---------------------------------------------------------------------------
-function normalizeCode(s) {
-  return (s || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
-}
-
-let expectedCode = null; // normalized expected value from session.json
-
-async function loadExpectedCode() {
-  try {
-    const res = await fetch("session.json", { cache: "no-store" });
-    if (!res.ok) throw new Error(`session.json HTTP ${res.status}`);
-    const data = await res.json();
-    expectedCode = normalizeCode(data.auth);
-  } catch (e) {
-    console.error("could not load session.json:", e);
-    gateError.textContent = "Could not contact host. Reload the page.";
-    connectBtn.disabled = true;
-  }
-}
-
-function tryUnlock() {
-  if (expectedCode === null) return; // not loaded yet
-  const entered = normalizeCode(codeInput.value);
-  if (entered.length === 0) {
-    gateError.textContent = "Enter the password.";
-    return;
-  }
-  if (entered === expectedCode) {
-    gateError.textContent = "";
-    gateEl.hidden = true;
-    viewerEl.classList.add("active");
-    startStreaming(); // only NOW do we touch WebRTC / signalling
-  } else {
-    gateError.textContent = "Incorrect password";
-    codeInput.focus();
-    codeInput.select();
-  }
-}
-
-connectBtn.addEventListener("click", tryUnlock);
-codeInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") tryUnlock();
-});
-codeInput.addEventListener("input", () => { gateError.textContent = ""; });
 
 // ---------------------------------------------------------------------------
 // Video playback helpers.
@@ -111,9 +58,7 @@ function toggleFullscreen() {
 }
 
 // ---------------------------------------------------------------------------
-// WebRTC consumption. Nothing below runs until startStreaming() is invoked by
-// the gate, so the producer subscription is genuinely blocked until the entered
-// code matches.
+// WebRTC consumption.
 // ---------------------------------------------------------------------------
 let api = null;
 let session = null;
@@ -194,6 +139,5 @@ function startStreaming() {
   else setStatus("waiting");
 }
 
-// Kick off loading the expected code immediately; the gate stays up until the
-// viewer enters a matching code.
-loadExpectedCode().then(() => codeInput.focus());
+// Kick the consumer off as soon as the page loads — no gate.
+startStreaming();

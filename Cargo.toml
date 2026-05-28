@@ -38,4 +38,8 @@ gstreamer-sdp = "0.25"
 # webrtcsink's navigation data channel — the receiver→sender remote-control input
 # path. v1_18 exposes the MouseScroll navigation variant (GStreamer 1.26 >> 1.18).
 gstreamer-video = { version = "0.25", features = ["v1_18"] }
+# mDNS service discovery (publish + browse). Pure-Rust, no avahi/bonjour shim.
+mdns-sd = "0.20"
+# Cross-platform `gethostname` for the mDNS service instance name.
+hostname = "0.4"
 qcast-core = { path = "crates/qcast-core" }

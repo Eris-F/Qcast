@@ -1,9 +1,9 @@
 //! End-to-end integration tests for the host.
 //!
 //! These exercise the real machinery — building the `webrtcsink` pipeline,
-//! binding the TURN relay, extracting the embedded web client, writing
-//! `session.json`, and serving HTTP — rather than the pure decision logic the
-//! unit tests in `host::tests` cover.
+//! binding the TURN relay, extracting the embedded web client, serving HTTP,
+//! and (Phase 1) round-tripping the mDNS publish/browse — rather than the
+//! pure decision logic the unit tests in `host::tests` cover.
 //!
 //! The heavy host-start tests bind real ports and need the `webrtcsink`
 //! GStreamer plugin, so they are marked `#[ignore]` and run explicitly with
@@ -130,9 +130,13 @@ fn http_get_with_retry(port: u16, path: &str, timeout: Duration) -> Option<(u16,
 
 /// Full host serves end-to-end: starting the host proves the TURN relay came up,
 /// the test source resolved, the `webrtcsink` pipeline built and reached Playing,
-/// the embedded web client extracted, and `session.json` was written. The HTTP
-/// GETs then prove the web server is actually serving the viewer markup and the
-/// access code, and the post-stop check proves the ports were released.
+/// and the embedded web client extracted. The HTTP GET then proves the web
+/// server is actually serving the (gateless) viewer markup, and the post-stop
+/// check proves the ports were released.
+///
+/// Phase 1 dropped the `session.json` access-code gate — pairing now happens at
+/// the signalling layer via `producer-peer-id` and the mDNS LAN-discovery TXT
+/// records (see `mdns.rs` and the `mdns_publisher_visible_to_browser` test).
 ///
 /// `#[ignore]` because it binds real ports and needs the `webrtcsink` GStreamer
 /// plugin; run with `cargo test -p qcast-sender -- --ignored`. Skips gracefully
@@ -162,17 +166,14 @@ fn full_host_serves_viewer_and_session() {
             .expect("web server should answer GET / before the deadline");
         assert_eq!(status, 200, "GET / should return 200");
         assert!(
-            body.contains("<title>Qcast</title>") || body.contains(r#"id="gate""#),
+            body.contains("<title>Qcast</title>"),
             "GET / body should contain the viewer markup; got first 200 chars: {:.200}",
             body
         );
-
-        let (status, body) = http_get_with_retry(web_port, "/session.json", Duration::from_secs(10))
-            .expect("web server should answer GET /session.json before the deadline");
-        assert_eq!(status, 200, "GET /session.json should return 200");
+        // The pre-pivot password-gate markup is gone.
         assert!(
-            body.contains(&access_code),
-            "session.json should carry the configured access code {access_code}; got: {body}"
+            !body.contains(r#"id="gate""#),
+            "GET / body should not contain the dropped password gate"
         );
     }));
 
@@ -316,4 +317,54 @@ fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// End-to-end mDNS round-trip: a publisher advertises the session and a browser
+/// running in the same process observes it, then sees it disappear after the
+/// publisher is dropped. Proves both the publish path (TXT records carry the
+/// peer-id) and the browse path (`MdnsBrowser::snapshot` reflects live state).
+///
+/// `#[ignore]` because it touches the real network (mDNS uses multicast UDP
+/// 5353) — in some CI sandboxes / Docker networks the loopback interface
+/// doesn't support multicast, in which case the test would never see the
+/// service. Matches the same `--ignored` convention the webrtcsink tests
+/// above use for "needs real system state".
+#[test]
+#[ignore]
+fn mdns_publisher_visible_to_browser() {
+    use crate::mdns::{MdnsBrowser, MdnsPublisher};
+
+    let peer_id = "TEST/CODE/123";
+    let publisher = MdnsPublisher::publish(peer_id, "qcast-mdns-test", 18443)
+        .expect("publisher should register the test service");
+    let browser = MdnsBrowser::start().expect("browser should start");
+
+    // Multicast announce + browser resolve takes a couple of seconds even on
+    // loopback; give it 5s to converge.
+    let appeared = wait_until(Duration::from_secs(5), || {
+        browser
+            .snapshot()
+            .iter()
+            .any(|s| s.peer_id == peer_id)
+    });
+    assert!(
+        appeared,
+        "browser should observe the published peer-id {peer_id} within 5s; \
+         snapshot = {:?}",
+        browser.snapshot()
+    );
+
+    // Dropping the publisher sends the goodbye packet and shuts the daemon
+    // down. The browser may take a moment longer to reflect the removal.
+    drop(publisher);
+
+    let disappeared = wait_until(Duration::from_secs(5), || {
+        !browser.snapshot().iter().any(|s| s.peer_id == peer_id)
+    });
+    assert!(
+        disappeared,
+        "browser should observe removal within 5s after publisher drop; \
+         snapshot = {:?}",
+        browser.snapshot()
+    );
 }

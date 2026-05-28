@@ -196,10 +196,12 @@ pub struct HostConfig {
     pub max_height: u32,
     /// Which video codec(s) to propose to viewers and in what preference order.
     pub codec_pref: CodecPref,
-    /// The viewer access code (the "password" the operator shares). Generated
-    /// once in `main()`; the single source of truth used by both the GUI display
-    /// and the served `session.json`. NOTE: this is a client-side UX gate, not
-    /// enforced authentication — anyone on the LAN can read `session.json`.
+    /// The pairing access code (e.g. `GHF/ABA/6TJ`). Generated once in `main()`;
+    /// the single source of truth used by the GUI display, the headless log
+    /// line, the mDNS `peer-id` TXT record (see `mdns.rs`), and the webrtcsink
+    /// `producer-peer-id` set on the signaller in [`build_pipeline`]. Pairing
+    /// is enforced at the signalling layer (consumer must subscribe to the
+    /// matching producer-peer-id), not the dropped client-side gate.
     pub access_code: String,
 }
 
@@ -208,13 +210,25 @@ pub struct HostConfig {
 pub struct RunningHost {
     quit: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
+    /// LAN-discovery publisher held for the host's lifetime. `Drop` on this
+    /// field unregisters the `_qcast._tcp.local.` service, so a stop-share
+    /// leaves no stale entry on the network. `Option` so we can take it on
+    /// stop and let its destructor run before joining the pipeline thread.
+    /// `None` if mDNS publish failed (we keep streaming either way — mDNS is
+    /// a discovery convenience, not load-bearing).
+    mdns: Option<crate::mdns::MdnsPublisher>,
     /// The viewer URL to share (e.g. `http://192.168.0.119:8080/`).
     pub url: String,
 }
 
 impl RunningHost {
-    /// Signal the pipeline thread to stop and wait for it to finish.
+    /// Signal the pipeline thread to stop and wait for it to finish. Drops the
+    /// mDNS publisher first so the goodbye packet goes out before the rest of
+    /// the host tears down.
     pub fn stop(&mut self) {
+        // Unpublish before flipping quit: the goodbye packet must reach the
+        // network before the OS reclaims any resources the daemon needs.
+        self.mdns.take();
         self.quit.store(true, Ordering::SeqCst);
         if let Some(h) = self.handle.take() {
             let _ = h.join();
@@ -238,25 +252,21 @@ pub fn lan_url(host: &str, web_port: u16) -> (String, String) {
     (lan_ip, url)
 }
 
-/// Write `session.json` into the served web-client directory. The browser fetches
-/// this on load to learn the expected access code for the password gate. Kept
-/// deliberately small: `{"name":"qcast","auth":"GHF/ABA/6TJ"}`.
-fn write_session_json(dir: &std::path::Path, access_code: &str) -> Result<()> {
-    let session = serde_json::json!({ "name": "qcast", "auth": access_code });
-    let body = serde_json::to_string(&session).context("serialize session.json")?;
-    let path = dir.join("session.json");
-    std::fs::write(&path, body).with_context(|| format!("write {}", path.display()))?;
-    tracing::debug!(path = %path.display(), "wrote session.json");
-    Ok(())
-}
-
 /// Start the host on a dedicated thread. Blocks until the pipeline reaches
 /// `Playing` (or fails), so the caller knows the URL is live before returning —
 /// this includes waiting for the operator to approve the screen-share dialog.
+///
+/// Once the pipeline is live, publishes the `_qcast._tcp.local.` mDNS service
+/// for LAN discovery. mDNS failure is non-fatal: the share still works, the
+/// receiver just has to type the pairing code by hand. See `mdns.rs`.
 pub fn start(cfg: HostConfig) -> Result<RunningHost> {
     let (lan_ip, url) = lan_url(&cfg.host, cfg.web_port);
     let quit = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel::<Result<()>>();
+
+    // Capture the bits we need for mDNS before moving cfg into the thread.
+    let peer_id = cfg.access_code.clone();
+    let signalling_port = cfg.signalling_port;
 
     let q = quit.clone();
     let ip = lan_ip.clone();
@@ -267,11 +277,29 @@ pub fn start(cfg: HostConfig) -> Result<RunningHost> {
 
     // Generous timeout: the portal picker is a human-in-the-loop step.
     match rx.recv_timeout(Duration::from_secs(120)) {
-        Ok(Ok(())) => Ok(RunningHost {
-            quit,
-            handle: Some(handle),
-            url,
-        }),
+        Ok(Ok(())) => {
+            // Pipeline is Playing; safe to advertise. Don't fail the host on
+            // mDNS errors — discovery is a convenience layer over the typed-
+            // code fallback path.
+            let hostname = crate::mdns::local_hostname();
+            let mdns = match crate::mdns::MdnsPublisher::publish(
+                &peer_id,
+                &hostname,
+                signalling_port,
+            ) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    tracing::warn!(error = %e, "mDNS publish failed; LAN discovery disabled");
+                    None
+                }
+            };
+            Ok(RunningHost {
+                quit,
+                handle: Some(handle),
+                mdns,
+                url,
+            })
+        }
         Ok(Err(e)) => {
             let _ = handle.join();
             Err(e)
@@ -481,11 +509,10 @@ fn prepare_resources(cfg: &HostConfig, lan_ip: &str) -> Result<SupervisorResourc
     // Extract (or locate) the web client once; the guard lives for the whole host.
     let web_client = WebClientDir::prepare().context("prepare web client")?;
 
-    // Write session.json into the served directory BEFORE the pipeline starts so
-    // it's available the instant the web server comes up. This carries the access
-    // code to the browser gate. Works for both the extracted-temp-dir case and
-    // the QCAST_WEB_CLIENT_DIR dev override (session.json is gitignored there).
-    write_session_json(web_client.path(), &cfg.access_code).context("write session.json")?;
+    // (Pre-Phase 1 we wrote `session.json` here carrying the access code for the
+    // browser-side password gate. The gate is gone; pairing now happens via the
+    // signalling-layer `producer-peer-id` set below + mDNS discovery in `start`.
+    // See deploy/UI_REWRITE.md §5.)
 
     // Acquire the capture source ONCE and reuse it across restarts. For real
     // Linux capture this runs the portal handshake (human picker); doing it here
@@ -630,6 +657,19 @@ fn build_pipeline(
         .map_err(|_| anyhow!("parsed description is not a pipeline"))?;
 
     if let Some(ws) = pipeline.by_name("ws") {
+        // Tag this producer with the access code so the consumer can subscribe by
+        // the human-shareable code instead of webrtcsink's auto-generated uuid.
+        // The `producer-peer-id` property lives on the `signaller` sub-object (NOT
+        // directly on webrtcsink) in gst-plugins-rs 0.15 — confirmed via
+        // `gst-inspect-1.0 webrtcsink` against the signaller. We deliberately set
+        // it post-parse here rather than baking it into the `gst::parse::launch`
+        // string, both because the slash-laden code (`GHF/ABA/6TJ`) is awkward to
+        // quote and because `signaller` isn't a string property settable from
+        // gst-launch syntax (it's a `GObject` sub-property).
+        let signaller = ws.property::<gst::glib::Object>("signaller");
+        signaller.set_property("producer-peer-id", &cfg.access_code);
+        tracing::debug!(peer_id = %cfg.access_code, "set webrtcsink producer-peer-id");
+
         // Codec preference governs which codecs are proposed and in what order.
         // VP8 has no profile/level ceiling, so a 1080p frame decodes on every
         // browser (incl. Firefox, whose H.264 is locked to L3.1/720p); H.264 is a

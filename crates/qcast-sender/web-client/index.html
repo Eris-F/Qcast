@@ -24,53 +24,8 @@
       overflow: hidden; -webkit-font-smoothing: antialiased;
     }
 
-    /* ---------- Password gate ---------- */
-    #gate {
-      position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
-      padding: 20px;
-      background:
-        radial-gradient(1200px 600px at 50% -10%, rgba(78,163,255,0.10), transparent 60%),
-        var(--bg);
-    }
-    #gate[hidden] { display: none; }
-    .card {
-      width: 100%; max-width: 380px; background: var(--panel);
-      border: 1px solid var(--border); border-radius: 16px; padding: 28px 26px 24px;
-      box-shadow: 0 20px 60px rgba(0,0,0,0.45);
-    }
-    .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
-    .brand .dot {
-      width: 12px; height: 12px; border-radius: 50%;
-      background: var(--accent); box-shadow: 0 0 12px var(--accent);
-    }
-    .brand h1 { font-size: 22px; margin: 0; letter-spacing: 0.5px; }
-    .card p.sub { margin: 0 0 20px; color: var(--muted); font-size: 14px; }
-    label.field-label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 8px; }
-    #code-input {
-      width: 100%; padding: 13px 14px; font-size: 18px; letter-spacing: 2px;
-      text-align: center; text-transform: uppercase;
-      background: var(--panel-2); color: var(--text);
-      border: 1px solid var(--border); border-radius: 10px; outline: none;
-      font-family: ui-monospace, "SF Mono", Menlo, monospace;
-      transition: border-color 0.15s, box-shadow 0.15s;
-    }
-    #code-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(78,163,255,0.18); }
-    #code-input::placeholder { color: #4a5263; letter-spacing: 2px; }
-    #connect {
-      width: 100%; margin-top: 16px; padding: 13px 14px; font-size: 16px; font-weight: 600;
-      color: #fff; background: linear-gradient(180deg, var(--accent), var(--accent-2));
-      border: none; border-radius: 10px; cursor: pointer; transition: filter 0.15s, opacity 0.15s;
-    }
-    #connect:hover { filter: brightness(1.07); }
-    #connect:active { filter: brightness(0.95); }
-    #connect:disabled { opacity: 0.6; cursor: default; }
-    #gate-error {
-      min-height: 18px; margin-top: 12px; font-size: 13px; color: var(--danger); text-align: center;
-    }
-
     /* ---------- Viewer ---------- */
-    #viewer { position: fixed; inset: 0; display: none; }
-    #viewer.active { display: block; }
+    #viewer { position: fixed; inset: 0; display: block; }
     #stage { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
     video { max-width: 100%; max-height: 100%; background: #000; }
 
@@ -113,21 +68,8 @@
   </style>
 </head>
 <body>
-  <!-- Password gate: shown FIRST. The stream does not start until the entered
-       code matches the host-provided session.json `auth` value. -->
-  <div id="gate">
-    <div class="card">
-      <div class="brand"><span class="dot"></span><h1>Qcast</h1></div>
-      <p class="sub">Enter the password from the host to view the stream.</p>
-      <label class="field-label" for="code-input">Password</label>
-      <input id="code-input" type="text" inputmode="text" autocomplete="off"
-             autocapitalize="characters" spellcheck="false" placeholder="XXX/XXX/XXX" />
-      <button id="connect" type="button">View stream</button>
-      <div id="gate-error" role="alert" aria-live="polite"></div>
-    </div>
-  </div>
-
-  <!-- Viewer: hidden until the gate is passed. -->
+  <!-- Viewer. Pairing is enforced at the signalling layer (producer-peer-id);
+       the pre-pivot client-side password gate has been removed. -->
   <div id="viewer">
     <div class="topbar">
       <div class="left">

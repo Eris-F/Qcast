@@ -30,6 +30,11 @@ util = { package = "webrtc-util", version = "0.17.1" }
 # Embed the web client into the binary so one self-contained file works for both
 # the AppImage and the Windows bundle (no source tree on the end-user machine).
 include_dir = "0.7"
+# mDNS publish/browse for LAN session discovery (sender advertises peer-id,
+# receiver lists nearby sessions). See deploy/UI_REWRITE.md §6.
+mdns-sd.workspace = true
+# Used by mdns publish to label the service instance with the local hostname.
+hostname.workspace = true
 
 # Desktop capture is platform-specific. The xdg-desktop-portal path (ashpd) is
 # Linux-only; Windows uses the d3d11 screen-capture GStreamer element (no extra
