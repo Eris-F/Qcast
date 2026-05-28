@@ -10,6 +10,7 @@
 
 mod event;
 mod inject_file;
+pub mod key;
 #[cfg(not(windows))]
 mod inject_other;
 #[cfg(windows)]

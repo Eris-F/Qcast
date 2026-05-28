@@ -13,6 +13,7 @@
 //!   monitor via `MOUSEEVENTF_ABSOLUTE` (0..65535). Multi-monitor (`VIRTUALDESK`)
 //!   and `add-borders` letterbox compensation are TODOs to settle during validation.
 
+use super::key::{classify_key, KeyAction, NamedKey};
 use super::{InputEvent, InputInjector, MouseButton};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
@@ -110,41 +111,44 @@ fn button_flag(button: MouseButton, pressed: bool) -> MOUSE_EVENT_FLAGS {
     }
 }
 
-/// Map a `GstNavigation` key string (X11 keysym name) to a Windows virtual key, for
-/// the control/navigation keys that can't be expressed as a typed Unicode character.
-fn named_key(key: &str) -> Option<VIRTUAL_KEY> {
-    Some(match key {
-        "Return" | "KP_Enter" => VK_RETURN,
-        "BackSpace" => VK_BACK,
-        "Tab" => VK_TAB,
-        "Escape" => VK_ESCAPE,
-        "space" => VK_SPACE,
-        "Delete" => VK_DELETE,
-        "Left" => VK_LEFT,
-        "Right" => VK_RIGHT,
-        "Up" => VK_UP,
-        "Down" => VK_DOWN,
-        "Home" => VK_HOME,
-        "End" => VK_END,
-        "Page_Up" => VK_PRIOR,
-        "Page_Down" => VK_NEXT,
-        _ => return None,
-    })
+/// Map an OS-neutral [`NamedKey`] (decided by the tested `classify_key`) to a Windows
+/// virtual key.
+fn named_vk(named: NamedKey) -> VIRTUAL_KEY {
+    use NamedKey::*;
+    match named {
+        Enter => VK_RETURN,
+        Backspace => VK_BACK,
+        Tab => VK_TAB,
+        Escape => VK_ESCAPE,
+        Space => VK_SPACE,
+        Delete => VK_DELETE,
+        Left => VK_LEFT,
+        Right => VK_RIGHT,
+        Up => VK_UP,
+        Down => VK_DOWN,
+        Home => VK_HOME,
+        End => VK_END,
+        PageUp => VK_PRIOR,
+        PageDown => VK_NEXT,
+    }
 }
 
 fn send_key(key: &str, pressed: bool) {
-    // Control/navigation keys: inject the virtual key with real press/release.
-    if let Some(vk) = named_key(key) {
-        send_vk(vk, pressed);
-        return;
-    }
-    // Printable text: type each UTF-16 unit as Unicode on the *press* only (Unicode
-    // injection is "produce this character"; a paired release would double it).
-    if pressed {
-        for unit in key.encode_utf16() {
-            send_unicode_unit(unit, true);
-            send_unicode_unit(unit, false);
+    match classify_key(key) {
+        // Control/navigation keys: inject the virtual key with real press/release.
+        KeyAction::Named(named) => send_vk(named_vk(named), pressed),
+        // Printable text: type each UTF-16 unit as Unicode on the *press* only
+        // (Unicode injection is "produce this character"; a paired release doubles it).
+        KeyAction::Text(text) => {
+            if pressed {
+                for unit in text.encode_utf16() {
+                    send_unicode_unit(unit, true);
+                    send_unicode_unit(unit, false);
+                }
+            }
         }
+        // Unmapped keysyms (F-keys, bare modifiers, …): dropped, not typed literally.
+        KeyAction::Ignore => {}
     }
 }
 
