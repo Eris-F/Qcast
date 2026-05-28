@@ -75,7 +75,13 @@ Windows parts as ready-to-run + a tight validation checklist.
 3. H.264 fallback actually negotiates; GIO TLS modules for DTLS on a clean box.
 4. The browser→webrtcsink data-channel→upstream-event link (everything after it is proven).
 
+## Done since first draft
+- **`qcast-sender` → library split** for the Tauri `share` role: `qcast_sender` lib now
+  exposes the host/TURN/bundle/input logic; `main.rs` is a thin wrapper. The Tauri app
+  can `use qcast_sender::{host, bundle, input}` directly. Bin unchanged, all green.
+- **Scroll-wheel** remote input (`InputEvent::MouseScroll` + Windows `WHEEL`/`HWHEEL`).
+
 ## Not yet started (tracked)
-- `qcast-sender` → library refactor for the Tauri `share` role.
-- Pairing secret at the signalling layer (mandatory now that we inject input; current
-  short-code gate is client-side only).
+- Pairing secret at the signalling layer (mandatory now that we inject input; the
+  current short-code gate is client-side only). The one remaining non-Windows item —
+  deferred as a security-sensitive webrtcsink-signaller change best done with validation.
