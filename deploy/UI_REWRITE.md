@@ -29,7 +29,7 @@ v0.1.0 installs cleanly on Windows but the app it ships is essentially
 
 | Area | Decision |
 |---|---|
-| Role picker | Always show launcher on every start. No "remember" checkbox. Two big cards: 🖥 Share / 👀 Connect. |
+| Role picker | Always show launcher on every start. No "remember" checkbox. Two big cards: **Host** / **Client**, each with a one-line formal helper underneath (e.g. "Host — Share this machine's screen and allow remote control" / "Client — Connect to and control a remote Host"). |
 | Window during session | Window collapses to tray when Share starts. `skipTaskbar=true`. Tray menu = Stop sharing / Show Qcast / Quit. |
 | UI framework | Vite + **Svelte 5 (runes)** + **shadcn-svelte** + **Tailwind v4** (via `@tailwindcss/vite`). Replaces hand-rolled HTML/JS in `crates/qcast-sender/web-client/`. |
 | Aesthetic | **Sharp dark.** Base color `zinc`. Border-radius ≤ 4px. 1px hard borders, no soft shadows on surfaces. Kept blue accent `#4ea3ff` (gradients only on the primary CTA). |
@@ -53,12 +53,12 @@ ASCII fidelity only. Visual polish belongs in the components, not here.
 │                                                            │
 │   ┌──────────────────────┐    ┌──────────────────────┐    │
 │   │                      │    │                      │    │
-│   │       🖥              │    │       👀              │    │
-│   │   Share my screen    │    │  Connect to a friend │    │
+│   │        Host          │    │       Client         │    │
 │   │                      │    │                      │    │
-│   │   (let them help     │    │   (control their     │    │
-│   │    me with my PC)    │    │    PC to help them)  │    │
-│   │                      │    │                      │    │
+│   │   Share this         │    │   Connect to and     │    │
+│   │   machine's screen   │    │   control a remote   │    │
+│   │   and allow remote   │    │   Host.              │    │
+│   │   control.           │    │                      │    │
 │   └──────────────────────┘    └──────────────────────┘    │
 │                                                            │
 │                                                            │
@@ -71,11 +71,12 @@ Notes:
 - Version label = clickable → "Check for updates".
 - Plain-language subtitles ("let them help me…") matter more than role names.
 
-### 3.2 Share — pre-flight
+### 3.2 Host — pre-flight
 
 ```
 ┌────────────────────────────────────────────────────────────┐
-│  ←  Share my screen                                   ⚙   │
+│  ←  Host                                              ⚙   │
+│     Share this machine's screen and allow remote control.  │
 │                                                            │
 │   Your pairing code:                                       │
 │   ┌──────────────────────────────────┐                     │
@@ -101,7 +102,7 @@ Notes:
 - Once `Start sharing` is clicked → window collapses to tray, tray icon turns
   red. A toast confirms: "Sharing started. Your code is GHF/ABA/6TJ."
 
-### 3.3 Share — in-session (window summoned from tray)
+### 3.3 Host — in-session (window summoned from tray)
 
 ```
 ┌────────────────────────────────────────────────────────────┐
@@ -117,13 +118,14 @@ Notes:
 └────────────────────────────────────────────────────────────┘
 ```
 
-### 3.4 Connect — LAN list + typed code
+### 3.4 Client — LAN list + typed code
 
 ```
 ┌────────────────────────────────────────────────────────────┐
-│  ←  Connect to a friend                              ⚙   │
+│  ←  Client                                            ⚙   │
+│     Connect to and control a remote Host.                  │
 │                                                            │
-│   📡  On this network                  (refreshing…)       │
+│   Hosts on this network                (refreshing…)       │
 │   ┌──────────────────────────────────────────────────┐    │
 │   │  ● ERIS-DESKTOP                       [ Join ]   │    │
 │   │  ● ALICE-LAPTOP                       [ Join ]   │    │
@@ -139,9 +141,9 @@ Notes:
 Notes:
 - The LAN list auto-refreshes **every 1.5s** (and is also push-updated when the
   backend mDNS browser fires an event). 1.5s is the worst-case visible delay
-  for "friend hits Share, I see them appear."
+  for "Host starts sharing → Client sees them appear."
 - Click `Join` on a LAN entry → connecting screen, no code prompt.
-- If empty: muted text "Nobody on this network is sharing right now."
+- If empty: muted text "No Hosts are sharing on this network right now."
 
 ### 3.5 Viewer (the existing screen, cleaned up)
 
