@@ -14,8 +14,25 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-global-shortcut = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The shared sender library: HostConfig, RunningHost, mDNS browser, access
+# code generator. We invoke this from the IPC layer so the Tauri shell and the
+# standalone `qcast-sender` binary drive the same battle-tested pipeline.
+qcast-sender = { path = "../crates/qcast-sender" }
+# Async runtime for the IPC commands + the LAN-push background loop. Macros for
+# `#[tokio::main]`-style attrs (if any), rt-multi-thread for `spawn_blocking`,
+# `sync` for primitives, `time` for `sleep`.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Phase 5 (updater): GitHub-Releases-backed signed auto-update.
+# `tauri-plugin-process` exposes the `relaunch()` command the JS side calls
+# after `update.downloadAndInstall()` completes.
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 [features]
 default = []

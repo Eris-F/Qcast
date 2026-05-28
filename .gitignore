@@ -1,3 +1,6 @@
+# Local signing keys — NEVER commit private material
+.local-secrets/
+
 /target
 **/*.rs.bk
 *.swp

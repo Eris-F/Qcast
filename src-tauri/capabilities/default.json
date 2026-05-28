@@ -1,7 +1,19 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main Qcast window",
+  "description": "Capability for the main Qcast window — exposes the IPC command surface and the few core window/tray permissions the shell needs.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-skip-taskbar",
+    "core:window:allow-set-focus",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:tray:allow-set-tooltip",
+    "global-shortcut:allow-register",
+    "global-shortcut:allow-unregister",
+    "global-shortcut:allow-unregister-all"
+  ]
 }

@@ -10,11 +10,14 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Qcast",
-        "width": 1280,
-        "height": 800,
+        "width": 920,
+        "height": 640,
         "resizable": true,
-        "skipTaskbar": false
+        "skipTaskbar": false,
+        "decorations": true,
+        "visible": true
       }
     ],
     "trayIcon": {
@@ -29,6 +32,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": ["nsis"],
     "icon": [
       "icons/32x32.png",
@@ -51,6 +55,14 @@
         "type": "offlineInstaller",
         "silent": true
       }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "REPLACE_ME_ON_FIRST_RELEASE",
+      "endpoints": [
+        "https://github.com/Eris-F/Qcast/releases/latest/download/latest.json"
+      ]
     }
   }
 }

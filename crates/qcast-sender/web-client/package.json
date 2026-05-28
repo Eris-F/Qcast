@@ -29,6 +29,8 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.0",
+    "@tauri-apps/plugin-updater": "^2.0.0",
+    "@tauri-apps/plugin-process": "^2.0.0",
     "svelte-spa-router": "^5.1.0"
   }
 }

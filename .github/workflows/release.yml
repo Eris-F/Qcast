@@ -271,3 +271,164 @@ jobs:
         with:
           files: ${{ steps.installer.outputs.path }}
           fail_on_unmatched_files: true
+
+  # ===========================================================================
+  # WINDOWS — Tauri NSIS installer + signed updater artifact  *** DRAFT ***
+  # ===========================================================================
+  # Phase 5: Tauri-bundled NSIS installer with a minisign-signed `.sig` so the
+  # in-app updater (`tauri-plugin-updater`) can verify downloads. The other
+  # Windows job above (windows-installer / Inno Setup) is the legacy installer
+  # track and stays around until this one is fully validated on a real run.
+  #
+  # Required GitHub Actions secrets (configure once, see deploy/UPDATES.md):
+  #   TAURI_SIGNING_PRIVATE_KEY           - contents of .local-secrets/qcast-updater.key.txt
+  #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  - password set at `cargo tauri signer generate` time
+  #
+  # The job emits three files into the GitHub Release:
+  #   * Qcast_<ver>_x64-setup.exe       - the NSIS installer
+  #   * Qcast_<ver>_x64-setup.exe.sig   - minisign signature over the .exe
+  #   * latest.json                     - the manifest tauri-plugin-updater fetches
+  # ---------------------------------------------------------------------------
+  windows-tauri-updater:
+    name: Windows Tauri installer + signed updater (DRAFT — first-run validation)
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Rust (stable, MSVC toolchain)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      # TODO(WINDOWS_INSTALLER.md): lift the GStreamer 1.26 MSVC + cargo-c +
+      # cargo-tauri install steps from deploy/WINDOWS_INSTALLER.md and from the
+      # `windows-installer` job above. The Tauri build expects the same
+      # gst-runtime layout that the legacy installer assembles via
+      # gather-payload.ps1 — so the practical move is to run that same script
+      # here too and point `bundle.resources` at the result. Until that's wired,
+      # this job will fail at the `cargo tauri build` step.
+      - name: Install GStreamer MSVC (runtime + devel) — DRAFT
+        shell: pwsh
+        run: |
+          choco install gstreamer --version=1.26.0 -y --no-progress
+          choco install gstreamer-devel --version=1.26.0 -y --no-progress
+          $root = "C:\gstreamer\1.0\msvc_x86_64"
+          "GSTREAMER_1_0_ROOT_MSVC_X86_64=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "$root\bin"                            | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Install cargo-c + tauri-cli
+        shell: pwsh
+        run: |
+          cargo install cargo-c
+          cargo install tauri-cli --version "^2"
+
+      # TODO(WINDOWS_INSTALLER.md): assemble the gst-runtime payload that
+      # src-tauri/tauri.conf.json's `bundle.resources` references. The
+      # gather-payload.ps1 script in deploy/windows/ already does this for the
+      # Inno Setup flow; reuse it (or extract its core) so the Tauri bundle has
+      # the same DLLs + curated plugins + gstrswebrtc.dll.
+      - name: Assemble gst-runtime payload — DRAFT
+        shell: pwsh
+        run: |
+          Write-Host "::warning::gst-runtime staging not yet wired for the Tauri job — see WINDOWS_INSTALLER.md"
+          # Placeholder so the next step's path checks don't blow up before the
+          # real wiring lands. Phase-5-merge follow-up.
+          New-Item -ItemType Directory -Force -Path "src-tauri\gst-runtime\bin" | Out-Null
+          New-Item -ItemType Directory -Force -Path "src-tauri\gst-runtime\lib\gstreamer-1.0" | Out-Null
+          New-Item -ItemType Directory -Force -Path "src-tauri\gst-runtime\libexec\gstreamer-1.0" | Out-Null
+
+      - name: Frontend build
+        shell: pwsh
+        run: |
+          Push-Location crates\qcast-sender\web-client
+          if (Test-Path package-lock.json) { npm ci } else { npm install }
+          # Phase 4 owns the build script; if `npm run build` is defined, run it.
+          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
+          if ($pkg.scripts -and $pkg.scripts.build) {
+            npm run build
+          } else {
+            Write-Host "no build script in package.json — using static assets as-is"
+          }
+          Pop-Location
+
+      # The real Phase-5 piece: invoke `cargo tauri build` with the signing
+      # env vars so it produces both the NSIS installer AND the .sig file
+      # next to it. The plugin's pubkey in tauri.conf.json must match.
+      - name: Tauri build (signed updater artifact)
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        working-directory: src-tauri
+        run: cargo tauri build
+
+      # Build the static `latest.json` the updater plugin fetches. The .sig
+      # file produced by Tauri sits next to the .exe and contains the
+      # minisign signature as base64 text — we inline it into the manifest.
+      #
+      # latest.json schema (from the Tauri v2 docs):
+      #   { "version", "notes", "pub_date", "platforms": {
+      #       "<target>": { "signature": "<.sig contents>", "url": "<download URL>" }
+      #     } }
+      - name: Build latest.json manifest
+        shell: pwsh
+        run: |
+          $bundleDir = "src-tauri\target\release\bundle\nsis"
+          $exe = Get-ChildItem -Path $bundleDir -Filter "*-setup.exe" -File `
+            | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $exe) { throw "No NSIS installer found under $bundleDir" }
+          $sigFile = "$($exe.FullName).sig"
+          if (-not (Test-Path $sigFile)) { throw "Expected sig file at $sigFile (cargo tauri build did not emit a signature — check TAURI_SIGNING_PRIVATE_KEY)" }
+          $sig = Get-Content $sigFile -Raw
+          # Strip the leading `v` from refs/tags/vX.Y.Z to get a plain semver.
+          $tag = $env:GITHUB_REF -replace '^refs/tags/', ''
+          $version = $tag -replace '^v', ''
+          $pubDate = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
+          $exeName = $exe.Name
+          $repo = $env:GITHUB_REPOSITORY  # e.g. "Eris-F/Qcast"
+          $downloadUrl = "https://github.com/$repo/releases/download/$tag/$exeName"
+          $manifest = [ordered]@{
+            version   = $version
+            notes     = "See the GitHub Release for full notes."
+            pub_date  = $pubDate
+            platforms = [ordered]@{
+              "windows-x86_64" = [ordered]@{
+                signature = $sig
+                url       = $downloadUrl
+              }
+            }
+          }
+          $manifest | ConvertTo-Json -Depth 6 | Out-File -FilePath "latest.json" -Encoding utf8
+          # Stage the .exe + .sig at the repo root next to latest.json so the
+          # release action picks them up via a single glob.
+          Copy-Item $exe.FullName -Destination (Join-Path (Get-Location) $exeName)
+          Copy-Item $sigFile      -Destination (Join-Path (Get-Location) ($exeName + ".sig"))
+          Write-Host "::notice::built $exeName + .sig + latest.json (version=$version)"
+
+      - name: Upload Tauri updater artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Qcast-Windows-Tauri-Updater
+          path: |
+            *-setup.exe
+            *-setup.exe.sig
+            latest.json
+          if-no-files-found: error
+
+      - name: Attach Tauri updater artifacts to Release (tag only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            *-setup.exe
+            *-setup.exe.sig
+            latest.json
+          fail_on_unmatched_files: true
