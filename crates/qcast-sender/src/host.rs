@@ -616,7 +616,7 @@ fn build_pipeline(
          ! video/x-raw,width={vw},height={vh},pixel-aspect-ratio=1/1 ! webrtcsink name=ws \
          run-signalling-server=true signalling-server-host={host} signalling-server-port={sport} \
          run-web-server=true web-server-host-addr=http://{host}:{wport} web-server-directory={dir} \
-         enable-control-data-channel=true",
+         enable-control-data-channel=true enable-data-channel-navigation=true",
         vw = cfg.max_width,
         vh = cfg.max_height,
         host = cfg.host,
@@ -662,6 +662,21 @@ fn build_pipeline(
         // one candidate pair per component, removing the nomination race. The
         // built-in TURN relay is always present, so a relay candidate is available.
         ws.set_property_from_str("ice-transport-policy", "relay");
+
+        // Receiver→sender remote control: webrtcsink surfaces the navigation events
+        // the receiver sends over the data channel (enable-data-channel-navigation,
+        // above) as upstream GstNavigation events. Probe them, decode to InputEvent,
+        // and inject on this machine. `frame` is the negotiated capped frame
+        // (cfg.max_width × max_height) used to normalize pointer coordinates.
+        let injector = crate::input::shared_injector();
+        let frame = (cfg.max_width as f64, cfg.max_height as f64);
+        let probed = crate::input::attach_navigation_probes(&ws, frame, injector);
+        tracing::debug!(pads = probed, "input: attached navigation probes to webrtcsink");
+        if probed == 0 {
+            tracing::warn!(
+                "input: webrtcsink exposed no sink pad to probe — remote control will be inert"
+            );
+        }
     }
 
     Ok(pipeline)

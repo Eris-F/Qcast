@@ -21,6 +21,7 @@ mod bundle;
 mod capture;
 mod gui;
 mod host;
+mod input;
 mod preflight;
 mod turn;
 

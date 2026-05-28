@@ -10,6 +10,7 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 gstreamer.workspace = true
+gstreamer-video.workspace = true
 clap.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
@@ -35,3 +36,8 @@ include_dir = "0.7"
 # crate). Keeping ashpd off non-Linux targets lets the Windows build compile.
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd.workspace = true
+
+# Remote-control input injection on Windows via SendInput (src/input/inject_windows.rs).
+# Windows-only so the Linux build neither fetches nor compiles it.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_UI_Input_KeyboardAndMouse"] }

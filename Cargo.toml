@@ -34,4 +34,7 @@ gstreamer = "0.25"
 gstreamer-app = "0.25"
 gstreamer-webrtc = "0.25"
 gstreamer-sdp = "0.25"
+# Typed parser for GstNavigation events (mouse/keyboard) delivered over webrtcsink's
+# navigation data channel — the receiver→sender remote-control input path.
+gstreamer-video = "0.25"
 qcast-core = { path = "crates/qcast-core" }
