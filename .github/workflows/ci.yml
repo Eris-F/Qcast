@@ -1,0 +1,88 @@
+# Push/PR CI — the always-green regression gate.
+#
+# Separate from release.yml (tag-triggered installer builds). This runs on every
+# push/PR so regressions surface immediately. The Windows job exists specifically to
+# COMPILE the cfg(windows) code (crates/qcast-sender/src/input/inject_windows.rs) that
+# the Linux dev box cannot build — it is the automated safety net for the SendInput
+# injection path. See deploy/TEST_PLAN.md (CI section).
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Linux: the primary gate. Mirrors the build/test the dev box runs green.
+  # ---------------------------------------------------------------------------
+  linux:
+    name: Linux build + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # GStreamer dev + runtime for building (gstreamer-rs / gstreamer-video link)
+      # and for the tests (videotestsrc/fakesink + GstNavigation parsing). Capture
+      # plugins aren't needed; the webrtcsink-dependent tests are #[ignore].
+      - name: Install GStreamer + build deps (apt)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            libssl-dev pkg-config build-essential
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (workspace)
+        run: cargo build --workspace --locked
+
+      - name: Test (workspace)
+        run: cargo test --workspace --locked
+
+  # ---------------------------------------------------------------------------
+  # Windows: compiles the cfg(windows) SendInput injector + runs the OS-agnostic
+  # tests on Windows. DRAFT + non-blocking (continue-on-error) until validated on a
+  # real Windows boot — promote to a required check once it's green. This is the
+  # only place inject_windows.rs gets compiled (no MSVC cross-target on the dev box).
+  # ---------------------------------------------------------------------------
+  windows:
+    name: Windows build + test (DRAFT — non-blocking)
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      # GStreamer 1.26 MSVC runtime + devel (matches release.yml). pkgconfiglite +
+      # PKG_CONFIG_PATH let gstreamer-rs's system-deps find the devel .pc files.
+      - name: Install GStreamer MSVC + pkg-config (choco)
+        shell: pwsh
+        run: |
+          choco install gstreamer --version=1.26.0 -y --no-progress
+          choco install gstreamer-devel --version=1.26.0 -y --no-progress
+          choco install pkgconfiglite -y --no-progress
+          $root = "C:\gstreamer\1.0\msvc_x86_64"
+          "GSTREAMER_1_0_ROOT_MSVC_X86_64=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "PKG_CONFIG_PATH=$root\lib\pkgconfig"  | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "$root\bin"                            | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Install Rust (stable, MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Builds inject_windows.rs (the whole point) + the rest of the sender.
+      - name: Build qcast-sender (compiles the Windows SendInput injector)
+        run: cargo build -p qcast-sender --locked
+
+      - name: Test qcast-sender
+        run: cargo test -p qcast-sender --locked
