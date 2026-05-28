@@ -3,7 +3,39 @@
 Autonomous session toward **finish pivot + installer** (Windows↔Windows remote support).
 Everything below is **committed on `master`, builds green, all tests pass** on Fedora.
 
-## The one hard blocker (read first)
+## 🎉 The installer is BUILT
+
+`~/qcast-vm/Qcast_0.1.0_x64-setup.exe` — **273 MB NSIS `-setup.exe`**, produced by
+`cargo tauri build` inside a rootless-podman/KVM Windows 11 VM stood up tonight.
+File magic confirms a real Nullsoft installer.
+SHA256: `d3ba235ce115d2b4f2cdc38125bceee49b29ca923e24d3cae0924fb101ea09c4`.
+
+How it got built, end-to-end and autonomous (no sudo, no Windows reboot):
+
+1. `flatpak install --user org.gnome.Boxes` → scriptable `qemu-system-x86_64` v7.2 +
+   OVMF UEFI inside the flatpak; `/dev/kvm` was world-accessible (0666).
+2. `dockur/windows` (rootless podman + `/dev/kvm` + `USER_PORTS=22`) downloaded the
+   official Win11 ISO + ran an unattended install with `/oem/install.bat` enabling
+   OpenSSH.
+3. SSH'd in (`qcast:qcastpass@localhost:2222`), `scp`'d the repo, installed the
+   toolchain (VS C++ Build Tools, Rust MSVC, GStreamer 1.26 MSVC runtime+devel via
+   official MSIs, cargo-c, `cargo install tauri-cli`).
+4. **First-ever Windows compile of `inject_windows.rs` caught exactly one type
+   mismatch** (`mouseData: i32` → `u32`); fix committed (`ded4de8`), then
+   `cargo build -p qcast-sender` succeeded + **all 32 unit tests passed on Windows.**
+5. Authored the Tauri scaffold (`src-tauri/`, independent workspace so Fedora root
+   build stays green; default icons from `tauri-apps/tauri` MIT template), staged 391
+   GStreamer DLLs + scanner into `src-tauri/gst-runtime/`, ran `cargo tauri build` →
+   the bundle above.
+
+**Honest caveat — the one missing piece for full runtime function:** the bundle has
+the official GStreamer payload but **not** `gstrswebrtc.dll` (the `gst-plugins-rs`
+webrtc plugin built via `cargo cbuild`). The installer installs cleanly and the app
+launches; `webrtcsink` won't instantiate until that one DLL is added — a 5-minute
+follow-up (clone gst-plugins-rs, `cargo cbuild -p gst-plugin-webrtc`, drop the DLL
+into `gst-runtime/lib/gstreamer-1.0/`, rebuild). Tracked.
+
+## The "Windows hardware" blocker that was here
 
 There is **no Windows test environment on this box**: Windows 25H2 is a bare-metal
 **dual-boot**, not a VM, and no virt tooling is installed. A dual-boot can't be driven
