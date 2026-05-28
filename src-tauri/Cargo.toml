@@ -1,0 +1,21 @@
+# Independent workspace — the Tauri app is NOT part of the root Qcast workspace so
+# the Fedora dev box (no webkit2gtk-devel, no cargo-tauri) keeps building green.
+# Build this only on Windows via deploy/tauri/build-windows.ps1.
+[workspace]
+
+[package]
+name = "qcast-app"
+version = "0.1.0"
+edition = "2021"
+description = "Qcast — Windows-first remote-support app (Tauri shell)"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+default = []
