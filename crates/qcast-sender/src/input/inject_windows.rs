@@ -88,7 +88,9 @@ fn send_wheel(x: f64, y: f64, flag: MOUSE_EVENT_FLAGS, wheel_delta: i32) {
             mi: MOUSEINPUT {
                 dx: to_absolute(x),
                 dy: to_absolute(y),
-                mouseData: wheel_delta,
+                // `MOUSEINPUT.mouseData` is u32; the Win32 wheel API treats it as a
+                // signed int via the bit pattern, so cast as-bits to preserve the sign.
+                mouseData: wheel_delta as u32,
                 dwFlags: flag | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE,
                 time: 0,
                 dwExtraInfo: 0,
