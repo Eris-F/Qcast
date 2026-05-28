@@ -48,6 +48,10 @@ pub enum InputEvent {
         y: f64,
         pressed: bool,
     },
+    /// Scroll the wheel at a normalized pointer position. `dx`/`dy` are the raw
+    /// `GstNavigation` scroll deltas (`dy > 0` conventionally scrolls down/toward
+    /// the user).
+    MouseScroll { x: f64, y: f64, dx: f64, dy: f64 },
     /// Press or release a key. `key` is the `GstNavigation` key string: a single
     /// character for printable keys (`"a"`, `"@"`) or an X11 keysym name for
     /// control keys (`"Return"`, `"BackSpace"`, `"Left"`).
@@ -81,6 +85,12 @@ impl InputEvent {
                 x: nx(x),
                 y: ny(y),
                 pressed: false,
+            },
+            NavigationEvent::MouseScroll { x, y, delta_x, delta_y, .. } => Self::MouseScroll {
+                x: nx(x),
+                y: ny(y),
+                dx: delta_x,
+                dy: delta_y,
             },
             NavigationEvent::KeyPress { key, .. } => Self::Key { key, pressed: true },
             NavigationEvent::KeyRelease { key, .. } => Self::Key { key, pressed: false },
@@ -146,6 +156,16 @@ mod tests {
         assert_eq!(
             InputEvent::from_navigation(&release, FRAME),
             Some(InputEvent::Key { key: "Return".into(), pressed: false })
+        );
+    }
+
+    #[test]
+    fn decodes_mouse_scroll() {
+        init();
+        let ev = NavigationEvent::new_mouse_scroll(960.0, 540.0, 0.0, -3.0).build();
+        assert_eq!(
+            InputEvent::from_navigation(&ev, FRAME),
+            Some(InputEvent::MouseScroll { x: 0.5, y: 0.5, dx: 0.0, dy: -3.0 })
         );
     }
 

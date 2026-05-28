@@ -16,9 +16,10 @@
 use super::{InputEvent, InputInjector, MouseButton};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
-    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
-    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
+    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
+    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
+    MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
     VK_BACK, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_NEXT, VK_PRIOR,
     VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB, VK_UP,
 };
@@ -39,6 +40,7 @@ impl InputInjector for SendInputInjector {
             InputEvent::MouseButton { button, x, y, pressed } => {
                 send_mouse(*x, *y, MOUSEEVENTF_MOVE | button_flag(*button, *pressed));
             }
+            InputEvent::MouseScroll { x, y, dx, dy } => send_scroll(*x, *y, *dx, *dy),
             InputEvent::Key { key, pressed } => send_key(key, *pressed),
         }
     }
@@ -58,6 +60,35 @@ fn send_mouse(x: f64, y: f64, flags: MOUSE_EVENT_FLAGS) {
                 dy: to_absolute(y),
                 mouseData: 0,
                 dwFlags: flags | MOUSEEVENTF_ABSOLUTE,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
+}
+
+/// Scroll the wheel at a normalized position. `GstNavigation` `delta_y > 0` is
+/// conventionally "down/toward the user"; Win32 `WHEEL` is positive "up/away", so
+/// vertical is negated. One notch = `WHEEL_DELTA` (120).
+fn send_scroll(x: f64, y: f64, dx: f64, dy: f64) {
+    if dy != 0.0 {
+        send_wheel(x, y, MOUSEEVENTF_WHEEL, (-dy * 120.0) as i32);
+    }
+    if dx != 0.0 {
+        send_wheel(x, y, MOUSEEVENTF_HWHEEL, (dx * 120.0) as i32);
+    }
+}
+
+fn send_wheel(x: f64, y: f64, flag: MOUSE_EVENT_FLAGS, wheel_delta: i32) {
+    let input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: to_absolute(x),
+                dy: to_absolute(y),
+                mouseData: wheel_delta,
+                dwFlags: flag | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE,
                 time: 0,
                 dwExtraInfo: 0,
             },
