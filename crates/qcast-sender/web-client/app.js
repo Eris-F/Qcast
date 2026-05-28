@@ -127,6 +127,16 @@ function consume(producer) {
 
   session = api.createConsumerSession(producer.id);
 
+  // Remote control — the receiver half of the remote-support pivot. Attaching the
+  // video element makes gstwebrtc-api forward this viewer's mouse / keyboard /
+  // scroll to the host as GstNavigation events over the data channel; the host has
+  // webrtcsink `enable-data-channel-navigation` on and replays them via SendInput
+  // (see crates/qcast-sender/src/input). Guarded so an older bundled api can't break
+  // the viewer. NOTE: needs browser/Windows validation (see deploy/TEST_PLAN.md).
+  if (typeof session.attachVideoElement === "function") {
+    session.attachVideoElement(video);
+  }
+
   session.addEventListener("streamsChanged", () => {
     const streams = session.streams;
     if (streams && streams.length > 0) {

@@ -138,7 +138,9 @@
         <button id="fullscreen-btn" class="iconbtn" type="button">Fullscreen</button>
       </div>
     </div>
-    <div id="stage"><video id="video" autoplay playsinline muted></video></div>
+    <!-- tabindex makes the video focusable so it receives keydown events for
+         remote-control keyboard forwarding (gstwebrtc-api attachVideoElement). -->
+    <div id="stage"><video id="video" tabindex="0" autoplay playsinline muted></video></div>
     <div id="tap-to-play"><span>▶ Tap to view</span></div>
   </div>
 
