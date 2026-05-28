@@ -16,21 +16,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-mod access_code;
-mod bundle;
-mod capture;
-mod gui;
-mod host;
-mod input;
-mod preflight;
-mod turn;
-
-// In-module integration tests. `qcast-sender` is a binary crate (no lib target),
-// so a top-level `tests/` directory can't reach the crate internals; we instead
-// follow the existing in-module `#[cfg(test)]` pattern and pull these into the
-// crate so they can call `host::start`, `turn::ensure_running`, etc. directly.
-#[cfg(test)]
-mod tests_integration;
+// The host logic now lives in the `qcast_sender` library (src/lib.rs) so the Tauri
+// `share` role can reuse it; this binary is a thin CLI/GUI wrapper over it.
+use qcast_sender::{access_code, bundle, gui, host};
 
 #[derive(Parser, Debug)]
 #[command(name = "qcast-sender", about = "Qcast host: serves a desktop stream to browsers")]
