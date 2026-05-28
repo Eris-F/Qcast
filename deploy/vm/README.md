@@ -9,6 +9,23 @@ OpenSSH on, driven **autonomously from the Fedora host**.
 > it** and run `deploy/tauri/build-windows.ps1`. The VM exists so the build can be
 > **automated/repeated** (and driven by Claude) without rebooting.
 
+## No-sudo path (verified on this box)
+
+`/dev/kvm` is world-accessible here (mode `0666`) and `flatpak` is installed, so a VM
+needs **no `sudo`** — only a Windows ISO. GNOME Boxes (flatpak, user-level) can do an
+**unattended** Windows install from an ISO (it generates the answer file + loads
+virtio), then `windows-setup.ps1` makes it build-ready:
+
+```bash
+flatpak remote-add --if-not-exists --user flathub https://flathub.org/repo/flathub.flatpakrepo
+flatpak install --user -y flathub org.gnome.Boxes
+# then: Boxes → New → select the Windows ISO → it offers Express/unattended install
+```
+
+So the only thing blocking an end-to-end build here is **a Windows ISO**: drop one in
+`~/Downloads` and Claude can take it from there with no sudo. The `virt-install` flow
+below is the alternative if you prefer system libvirt.
+
 ## Flow
 
 1. **You** (Claude has no passwordless sudo): install virt tooling + get media —
