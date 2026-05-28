@@ -129,6 +129,14 @@ function Resolve-GstRoot() {
 #   libgstplayback.so           gstplayback.dll            webrtcsink internal helper
 #   (Linux-only, EXCLUDED)      -                          libgstpipewire.so, libgstximagesrc.so
 #   (Windows-only, ADDED)       gstd3d11.dll               d3d11screencapturesrc + d3d11download
+#   (H.264 fallback, ADDED)     gstmediafoundation.dll     mfh264enc/dec - native Windows HW H.264 (LGPL)
+#   (H.264 fallback, ADDED)     gstopenh264.dll            Cisco OpenH264 software H.264 (LGPL)
+#   (H.264 fallback, ADDED)     gstvideoparsersbad.dll     h264parse - required by the H.264 path
+#
+# H.264 NOTE: VP8 (gstvpx.dll) stays the preferred/default codec; H.264 is the
+# fallback some peers negotiate (Chrome/Safari/hardware). We ship ONLY LGPL-clean
+# H.264 (Media Foundation + OpenH264) and NEVER gstx264.dll (GPL). Without these
+# three the H.264 fallback silently fails to negotiate.
 # ---------------------------------------------------------------------------
 $Plugins = @(
   "gstcoreelements.dll",
@@ -155,7 +163,11 @@ $Plugins = @(
   "gstautodetect.dll",
   "gstplayback.dll",
   # Windows-only capture (see capture.rs: d3d11screencapturesrc ! d3d11download).
-  "gstd3d11.dll"
+  "gstd3d11.dll",
+  # H.264 fallback (VP8 stays preferred). LGPL-clean only - NEVER gstx264.dll (GPL).
+  "gstmediafoundation.dll",   # mfh264enc/dec - native Windows hardware H.264
+  "gstopenh264.dll",          # Cisco OpenH264 - software H.264 fallback
+  "gstvideoparsersbad.dll"    # h264parse - required by the H.264 path
 )
 
 # ---------------------------------------------------------------------------
